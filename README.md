@@ -5,6 +5,10 @@ This is a port of Strata's all-cards split engine (`strata-split-2`) to the NVID
 context, MTP drafting and pictures. On our server it writes **about 67 tokens a second** and reads a long prompt at
 **about 920 tokens a second**.
 
+> **Currently built for one model file only: ISTA-DASLab's IQ3_S GGUF, on Tesla P100 cards.** Other quantizations, such
+> as Unsloth's UD-Q4_K_XL, do not use this port's P100 kernels and run slower than Strata itself, or not at all (see
+> "Known limitations"). On other cards, or with other files, use [Strata](https://github.com/Niko1221/Strata).
+
 The engine is one executable. [Strata](https://github.com/Niko1221/Strata)'s Python server (v0.2.9) drives it and gives
 you the OpenAI-compatible API, the tokenizer and the chat template. This repository holds the engine's sources exactly
 as they run in our production, the build, an example run config, and the benchmark we measure with. The model is not
@@ -307,14 +311,23 @@ none of them was measured on another machine.
   profile.
 - **Power limit:** at 250 W instead of our 185 W, long reads were at most 1-1.5 % faster on our cards.
 - **P100 SXM2:** the same chip and should run; NVLink is not used. Not tried.
+- **Volta and newer cards** (sm_70 and up): the P100 kernels are used only below sm_70, so a build for those cards is
+  Strata v0.2.10's split engine with a profile tuned for 16 GB P100s, older than current Strata. Use Strata there.
 - **Other Pascal cards** (P40, GTX 10x0, sm_61): not supported. The engine refuses an architecture it was not built for,
   and its kernels are built on FP16 arithmetic, which those chips run at a small fraction of the P100's rate.
 - **Three or four cards:** Strata's code has them; this port has only run on two.
 
 ## Known limitations
 
-- Built and run for two P100 16 GB, Linux, and the IQ3_S file only. The ISTA IQ2_XS file ran on an earlier build of this
-  port (7-8 Nov, about 65 tok/s fresh); it has not been run on this one. The Q2_0 and IQ3_XXS files have not been run.
+- **Only the IQ3_S file.** The port's P100 expert kernels cover the expert types IQ3_S, IQ3_XXS, IQ2_S, IQ4_XS, IQ4_NL,
+  Q4_0, IQ2_XXS and IQ1_M. Files whose experts are K-quants, such as Unsloth's UD-Q4_K_XL (Q4_K, Q5_K, Q6_K, Q8_0), get
+  none of them: writing falls back to Strata's original kernels, and reading a prompt stops with
+  `p100 moe: expert type N not handled` (with `FNX_PF_MOE_Q8=1` it reads through the writing kernels, slowly). A tester
+  ran UD-Q4_K_XL on this port beside current Strata on the same machine, and the port was slower on every test; on IQ3_S
+  the tester got the same results as ours. These files also hold more expert bytes (UD-Q4_K_XL about 72 GiB against 47), so
+  less of them fits on the cards. Of ISTA's other files, IQ2_XS ran on an earlier build of this port (7-8 Nov, about
+  65 tok/s fresh) but not on this one; Q2_0 and IQ3_XXS have not been run.
+- Two P100 16 GB and Linux only.
 - One request at a time is what we tuned for (`--batch 1`).
 - The engine refuses `logprobs`.
 - Loading takes about 5 minutes; the first answers after a load are slower while the expert cache settles.
