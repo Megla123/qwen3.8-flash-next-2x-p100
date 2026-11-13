@@ -58,7 +58,7 @@
   "FNX_P100_DMA": "1",
   "FNX_EXPERT_PROFILE": "{{RELEASE}}/engine/data/expert-routes.bin",
   "FNX_PREFETCH": "1",
-  "FNX_PREFETCH_WANT": "6",
+  "FNX_PREFETCH_WANT": "2",
   "FNX_PREFETCH_MIN_T": "2",
   "FNX_ROUTE_PRIOR": "{{ROUTE_PRIOR}}",
   "FNX_DMA_SPLIT": "2",
@@ -74,6 +74,6 @@
   "FNX_PF_SP": "1",
   "FNX_SH_IN": "0",
   "FNX_PLE_RAM": "0",
-  "FNX_EXPERT_DYN_GIB": "14"
+  "FNX_EXPERT_DYN_GIB": "18"
  }
 }

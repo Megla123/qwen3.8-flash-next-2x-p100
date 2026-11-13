@@ -18,7 +18,7 @@
 #   bash setup.sh /data/flash-next-q4 --model q4_k_xl         # Unsloth's UD-Q4_K_XL (README, "Unsloth's UD-Q4_K_XL")
 #
 # Options:
-#   --model M        iq3_s (default): ISTA-DASLab's GSQ-RCO IQ3_S; q4_k_xl: Unsloth's UD-Q4_K_XL (256k, needs 96 GB of RAM)
+#   --model M        iq3_s (default): ISTA-DASLab's GSQ-RCO IQ3_S; q4_k_xl: Unsloth's UD-Q4_K_XL (512k, needs 96 GB of RAM)
 #   --models DIR     the model files somewhere else (for example already downloaded); missing ones are downloaded there
 #   --strata DIR     an existing Strata checkout at v0.2.9 instead of DATA/strata-v0.2.9
 #   --no-pictures    no projector download, no encoder build, a profile without pictures

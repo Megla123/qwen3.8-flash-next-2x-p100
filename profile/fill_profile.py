@@ -8,7 +8,8 @@
 --models     the folder with the model's files (both IQ3_S shards, or the four UD-Q4_K_XL parts) and
              mmproj-Qwen3.8-Flash-Next-BF16.gguf
 --model      iq3_s (default): ISTA-DASLab's IQ3_S, flash-next-iq3s-512k.template.json; q4_k_xl: Unsloth's UD-Q4_K_XL,
-             flash-next-q4_k_xl-256k.template.json (README, "Unsloth's UD-Q4_K_XL")
+             flash-next-q4_k_xl-512k.template.json (README, "Unsloth's UD-Q4_K_XL"; its 256k one with
+             --template profile/flash-next-q4_k_xl-256k.template.json)
 --mtp        the MTP draft layer's runtime folder (dense.bin, dense.txt, experts.bin; README, "The MTP draft layer")
 --tokenizer  the tokenizer folder (vocab.json, merges.txt, chat_template.jinja ...; README, "The tokenizer folder")
 --vision-exe Strata's strata-vision; leave it out to run without pictures (the "vision" block and --vision go)
@@ -33,7 +34,7 @@ RELEASE = HERE.parent
 MODELS = {
     "iq3_s": ("flash-next-iq3s-512k.template.json",
               [f"Qwen3.8-Flash-Next-GSQ-RCO-IQ3_S-0000{i}-of-00002.gguf" for i in (1, 2)]),
-    "q4_k_xl": ("flash-next-q4_k_xl-256k.template.json",
+    "q4_k_xl": ("flash-next-q4_k_xl-512k.template.json",
                 [f"Qwen3.8-Flash-Next-UD-Q4_K_XL-0000{i}-of-00004.gguf" for i in (1, 2, 3, 4)]),
 }
 

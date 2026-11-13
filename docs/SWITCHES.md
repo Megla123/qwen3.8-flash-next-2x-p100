@@ -62,19 +62,21 @@ they cost.
 | `FNX_EXPERT_DYN_GIB` | 13 | unset | ours | of the experts in VRAM only the coldest N GiB keep a RAM copy and take part in the expert cache; the rest stay in VRAM for good with no RAM copy, so RAM holds `FNX_EXPERT_RAM_GIB` + N GiB of experts instead of all of them (IQ3_S: 48.8 GiB). The K/V pool (`FNX_ARENA`) and the prompt path (`FNX_PF_LEND`) borrow only those N GiB's slots: the load stops with a message when they cannot hold `--max-context` or the prompt buffers | none |
 | `FNX_EXPERT_DYN_MIN` | unset | 384 | ours | with `FNX_EXPERT_DYN_GIB`: at least this many experts of each expert size stay in the cache (a window's picks) | none |
 
-## The UD-Q4_K_XL profile
+## The UD-Q4_K_XL profiles
 
-`flash-next-q4_k_xl-256k.template.json` (`fill_profile.py --model q4_k_xl`) is the IQ3_S template with the changes below.
-README, "Unsloth's UD-Q4_K_XL", has what they gave.
+`flash-next-q4_k_xl-512k.template.json` (`fill_profile.py --model q4_k_xl`, `setup.sh --model q4_k_xl`) and
+`flash-next-q4_k_xl-256k.template.json` (`fill_profile.py --model q4_k_xl --template profile/flash-next-q4_k_xl-256k.template.json`)
+are the IQ3_S template with the changes below; the two differ only in `--max-context` and YaRN. README, "Unsloth's
+UD-Q4_K_XL", has what they gave.
 
-| Switch or argument | Q4 profile | IQ3_S profile | Why |
+| Switch or argument | Q4 profiles | IQ3_S profile | Why |
 |---|---|---|---|
-| `--max-context` | 262144, no YaRN | 524288, YaRN x2 | at 524,288 the load stops: the prompt path's two staging buffers need about 1.95 GiB a card (IQ3_S about 1), more than the lent slots leave |
+| `--max-context` | 524288 with YaRN x2 (512k), or 262144 without (256k) | 524288, YaRN x2 | at 524,288 the K/V pool may borrow up to 7.6 GiB of expert slots a card; those experts need their RAM copies (`FNX_EXPERT_DYN_GIB` below) |
 | `FNX_EXPERT_RAM_GIB` | 52.5 | 29.0 | 71.7 GiB of experts (IQ3_S 48.8); the rest sizes the VRAM slots as before |
-| `FNX_EXPERT_DYN_GIB`, `FNX_PLE_RAM` | 14, 0 | unset, 1 | the 64 GB mode's switches. With every expert pinned in RAM (73 GiB) 9 GiB of page cache were left for the 28.8 GB lookup table, and a 36k read ran at 146 tok/s. With 5.2 GiB of experts in VRAM for good (no RAM copy) and the table read through the page cache: 722-905 |
-| `FNX_PF_TAIL_MIB` | 4096 | 3000 | the bigger staging buffers |
+| `FNX_EXPERT_DYN_GIB`, `FNX_PLE_RAM` | 18, 0 | unset, 1 | the 64 GB mode's switches. With every expert pinned in RAM (73 GiB) 9 GiB of page cache were left for the 28.8 GB lookup table, and a 36k read ran at 146 tok/s. With the table read through the page cache and 18 GiB of the cards' experts dynamic (1.2 GiB stay in VRAM for good without a RAM copy), RAM holds 70.5 GiB of experts. 14 (5.2 GiB for good, 66.5 GiB in RAM) loads at 256k only and edits ran 12-14 % slower: the experts kept for good are chosen by a general route profile, the dynamic ones follow the work |
+| `FNX_PF_TAIL_MIB` | 4096 | 3000 | the bigger staging buffers (about 1.95 GiB a card, IQ3_S about 1). Staging buffers of half the size (`FNX_PF_STAGE_MIB=512`) need 2 GiB less of RAM copies, but reads ran 19-33 % slower |
 | `FNX_SH_IN` | 0 | unset (1) | ours: 0 sends the Q4_K layers through the P100 row kernel with the shared expert beside it, instead of Strata's decode kernels with the shared expert inside (writing +7 %; rounding) |
-| `FNX_PREFETCH_MIN_T` | 2 | 4 | next-layer copies from windows of 2 rows on: writing +2.6 %, writing after a long read +4.5 % (with IQ3_S: nothing) |
+| `FNX_PREFETCH_MIN_T`, `FNX_PREFETCH_WANT` | 2, 2 | 4, 6 | next-layer copies from windows of 2 rows on, of 2 guessed experts a row: every guessed copy is 1.46 MiB a card that competes with the window's own missing experts on PCIe. Edits at 512k (our rounds `q4k5`, `q4k7`, py / md tok/s): 9 a row 54 / 57, 6 a row 67.4-67.9 / 69.3-70.3, 4: 73.5-75.3 / 78.1-79.3, 3: 76.1-77.7 / 81.7-83.3, 2: 77.4-78.0 / 81.9-84.3, prefetch off: 72.2-72.6 / 77.2-78.1; fresh writing 55.8-57.5 in all. With IQ3_S, 4 a row and from 2 rows gave nothing |
 
 ## Our other switches
 

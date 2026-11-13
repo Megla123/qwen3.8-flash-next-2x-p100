@@ -38,7 +38,8 @@ INPUT_PATHS = ("docs", "src", "tools/collect_profile_traces.py")
 
 # Our numbers (2 x Tesla P100 16 GB PCIe x16 Gen3, 2 x Xeon Bronze 3106, 96 GB DDR4; profile/ with FNX_ROUTE_PRIOR=0): this
 # benchmark on this release's engine (c213636c) as build.sh built it, each on a freshly loaded engine, 13 Nov 2026, one run each
-# (README, "Our numbers"). Keys: --ours, or the model the server reports (auto).
+# (README, "Our numbers"; UD-Q4_K_XL's in a second window that day, with the profiles as they are now). Keys: --ours, or the model
+# the server reports (auto: q4_k_xl is the 512k profile).
 REFERENCE = {
     "iq3_s": {   # the IQ3_S profile (512k); pictures were off in this run (our rounds: first answer 2.6-2.7 s, then 52.4-52.6)
         "fresh": 66.63, "edit_py": 110.95, "edit_md": 116.0, "long_read": 953.9, "long_write": 61.8,
@@ -49,10 +50,15 @@ REFERENCE = {
         "fresh": 63.27, "edit_py": 93.55, "edit_md": 101.9, "long_read": 767.7, "long_write": 61.4,
         "medium": {6000: 613, 12000: 717, 18000: 759, 24000: 710, 36000: 850, 48000: 783, 72000: 817},
     },
-    "q4_k_xl": {   # the UD-Q4_K_XL profile (256k), short of RAM in this run (README, "Unsloth's UD-Q4_K_XL")
-        "fresh": 41.41, "edit_py": 45.3, "edit_md": 43.9, "long_read": 725.8, "long_write": 44.7,
-        "medium": {6000: 529, 12000: 671, 18000: 715, 24000: 668, 36000: 804, 48000: 617, 72000: 661},
-        "image_first_s": 4.81, "image_write": 40.5,   # from the run of our production engine c213636c (this build: 48.4 s, 39.8)
+    "q4_k_xl": {   # the UD-Q4_K_XL profile (512k), the lookup table cold at the start (README, "Unsloth's UD-Q4_K_XL")
+        "fresh": 50.26, "edit_py": 62.6, "edit_md": 63.5, "long_read": 765.0, "long_write": 48.5,
+        "medium": {6000: 540, 12000: 681, 18000: 721, 24000: 687, 36000: 813, 48000: 732, 72000: 781},
+        "image_first_s": 4.23, "image_write": 42.6,
+    },
+    "q4_k_xl_256k": {   # its 256k profile, run right after the 512k one: the lookup table mostly in the page cache
+        "fresh": 51.07, "edit_py": 63.0, "edit_md": 63.7, "long_read": 900.8, "long_write": 48.0,
+        "medium": {6000: 603, 12000: 755, 18000: 793, 24000: 752, 36000: 887, 48000: 805, 72000: 853},
+        "image_first_s": 4.08, "image_write": 43.2,
     },
 }
 UNITS = {"image_first_s": "s"}

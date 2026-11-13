@@ -27,7 +27,8 @@ digits of each binary's SHA-256.
 | 12 Nov | `2ef67b0e` | the byte dot product in one of three exact forms (`vmad`, `prmt`+`xmad`, the compiler's), chosen per kernel and window size | edits +3.3 %, fresh +0.7 % |
 | 12 Nov | `5ef3a6ae` | the prompt expert kernel with two weight buffers (`FNX_PF_JOBV=7`); also the code of two router and `hc` ideas that gave nothing (off) | long read +0.6 %; the first release |
 | 12 Nov | `bf9c7f1f` | each card reads `hc` only for its own rows of a prompt pass and the cards trade the mixed rows (`FNX_PF_SP`) | long read 920 → 961 (+4.4 %), deep +4.8 %, medium reads from 36k +3.7-4.5 % |
-| 13 Nov | **`c213636c`** | P100 kernels for UD-Q4_K_XL's expert types (Q4_K, Q5_K, Q5_1, Q8_0) and `FNX_SH_IN`; the 64 GB mode (`FNX_PLE_RAM`, `FNX_EXPERT_DYN_GIB`, written in this repository); two RAM placement ideas that gave nothing (`FNX_NUMA_EXPERTS`, `FNX_PLE_WARM`, off) | UD-Q4_K_XL: a 36k read 146 → 722-905 tok/s, fresh writing 52.6; IQ3_S unchanged; **this release** |
+| 13 Nov | **`c213636c`** | P100 kernels for UD-Q4_K_XL's expert types (Q4_K, Q5_K, Q5_1, Q8_0) and `FNX_SH_IN`; the 64 GB mode (`FNX_PLE_RAM`, `FNX_EXPERT_DYN_GIB`, written in this repository); two RAM placement ideas that gave nothing (`FNX_NUMA_EXPERTS`, `FNX_PLE_WARM`, off) | UD-Q4_K_XL: a 36k read 146 → 722-905 tok/s, fresh writing 52.6; IQ3_S unchanged; the first UD-Q4_K_XL release |
+| 13 Nov | `c213636c` | UD-Q4_K_XL settings only: a 512k profile (`FNX_EXPERT_DYN_GIB=18`: the K/V pool borrows up to 7.6 GiB of expert slots a card), the 256k one with the same 18, and 2 guessed experts a row in the next-layer copies (`FNX_PREFETCH_WANT=2`, was 6) | UD-Q4_K_XL in the benchmark: fresh 41.4 → 50.3, edits 45.3 / 43.9 → 62.6 / 63.5, long read 726 → 765, the picture's first answer 48.4 → 4.2 s (512k); reads to 501k tokens at 737 tok/s; **this release** |
 
 ## Tried and dropped
 
@@ -47,6 +48,9 @@ Kept in the code where it was cheap, off by default (see [SWITCHES.md](SWITCHES.
 - Huge pages for the lookup table (load 309 s), NUMA placement of RAM (both cards read either CPU's memory at 11.9 GB/s),
   the `performance` governor, C-states off, a higher power limit (+1-1.5 % long reads at 250 W).
 - Strata's one-hop sum (`FNX_ONEHOP=2`): +1.4 %, but different last bits.
+- For UD-Q4_K_XL: more next-layer copies (9 a row: edits −20 %), half-size staging buffers to save 2 GiB of RAM (reads
+  −19-33 %), 384 MiB of VRAM reserve instead of 512 (nothing), shorter lookup drafts (nothing: the same copies per token),
+  the GDN state snapshots shrunk for windows of 8 rows (the prompt path borrows that block as its scratch).
 
 ## The patch scripts
 
