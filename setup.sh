@@ -2,7 +2,8 @@
 # setup.sh DATA [options]: everything the engine needs besides itself, in the folder DATA (run build.sh first):
 #
 #   DATA/strata-v0.2.9    Strata's server and tools at v0.2.9, with their Python environment (.venv)
-#   DATA/models           the model's two IQ3_S shards and the picture projector (85 GB), checked against SHA-256
+#   DATA/models           the model's two IQ3_S shards (or with --model q4_k_xl the four UD-Q4_K_XL parts) and the picture
+#                         projector (85 GB, or 112 GB), checked against SHA-256
 #   DATA/prep/tokenizer   the tokenizer folder, from the GGUF's metadata (Strata's tools/strata_tokenizer.py)
 #   DATA/prep/mtp-rt      the MTP draft layer: 5.2 GB read from Qwen's checkpoint and packed (Strata's tools/mtp_*.py)
 #   DATA/strata-v0.2.9/build-vision/bin/strata-vision   the picture encoder (not with --no-pictures)
@@ -13,12 +14,16 @@
 #   bash setup.sh /data/flash-next
 #   bash setup.sh /data/flash-next --check                    # the checks and what is still to do; changes nothing
 #   bash setup.sh /data/flash-next --models /mnt/models --no-pictures --route-prior 0.15
+#   bash setup.sh /data/flash-next --ram 64                   # a machine with 64 GB of RAM (README, "64 GB of RAM")
+#   bash setup.sh /data/flash-next-q4 --model q4_k_xl         # Unsloth's UD-Q4_K_XL (README, "Unsloth's UD-Q4_K_XL")
 #
 # Options:
+#   --model M        iq3_s (default): ISTA-DASLab's GSQ-RCO IQ3_S; q4_k_xl: Unsloth's UD-Q4_K_XL (256k, needs 96 GB of RAM)
 #   --models DIR     the model files somewhere else (for example already downloaded); missing ones are downloaded there
 #   --strata DIR     an existing Strata checkout at v0.2.9 instead of DATA/strata-v0.2.9
 #   --no-pictures    no projector download, no encoder build, a profile without pictures
 #   --route-prior X  FNX_ROUTE_PRIOR in the profile: 0 (default) is exact; 0.15 is our production setting, faster, lossy
+#   --ram 64         the 64 GB mode in the profile (262,144 positions, the lookup table from the disk; IQ3_S only); default 96
 #   --check          only check and report
 # Environment: HF_TOKEN (sent to Hugging Face if set), CUDA, HOSTCXX (as for build.sh), JOBS (encoder build, default 6).
 set -euo pipefail
@@ -29,30 +34,40 @@ die() { echo "setup.sh: $*" >&2; exit 1; }
 STRATA_REPO=https://github.com/Niko1221/Strata.git
 STRATA_TAG=v0.2.9
 STRATA_COMMIT=c62d5e3a15b40ea51c96aae9e8d36928965f53ab
-HF_REPO=ISTA-DASLab/Qwen3.8-Flash-Next-GSQ-RCO-GGUF
-HF_REV=ed59f92082b1e93c0e96d60a8b11aab089b52f09        # the revision Strata v0.2.9 and v0.2.10 pin
-SHARD1=Qwen3.8-Flash-Next-GSQ-RCO-IQ3_S-00001-of-00002.gguf
-SHARD2=Qwen3.8-Flash-Next-GSQ-RCO-IQ3_S-00002-of-00002.gguf
-MMPROJ=mmproj-Qwen3.8-Flash-Next-BF16.gguf
-declare -A SIZE=([$SHARD1]=54817524224 [$SHARD2]=28800138432 [$MMPROJ]=907543008)
-declare -A SHA=([$SHARD1]=4c1eb2ceb4915e1192f4f386021897bde56a97f40a0bb78bb86465e0f7d2aca3
-                [$SHARD2]=316b46f3a2dbd68c900f43136ab9449f9dcc3725dfd8c794847c204bc161e113
+ISTA=https://huggingface.co/ISTA-DASLab/Qwen3.8-Flash-Next-GSQ-RCO-GGUF/resolve/ed59f92082b1e93c0e96d60a8b11aab089b52f09   # Strata's pin
+UNSLOTH=https://huggingface.co/unsloth/Qwen3.8-Flash-Next-GGUF/resolve/084c631ac221016019d6e0a863afe92d90edd3b0/UD-Q4_K_XL
+IQ3_S=(Qwen3.8-Flash-Next-GSQ-RCO-IQ3_S-00001-of-00002.gguf Qwen3.8-Flash-Next-GSQ-RCO-IQ3_S-00002-of-00002.gguf)
+Q4_K_XL=(Qwen3.8-Flash-Next-UD-Q4_K_XL-00001-of-00004.gguf Qwen3.8-Flash-Next-UD-Q4_K_XL-00002-of-00004.gguf
+         Qwen3.8-Flash-Next-UD-Q4_K_XL-00003-of-00004.gguf Qwen3.8-Flash-Next-UD-Q4_K_XL-00004-of-00004.gguf)
+MMPROJ=mmproj-Qwen3.8-Flash-Next-BF16.gguf   # ISTA-DASLab's projector, also for UD-Q4_K_XL (ours runs it with both)
+declare -A SIZE=([${IQ3_S[0]}]=54817524224 [${IQ3_S[1]}]=28800138432
+                 [${Q4_K_XL[0]}]=10946618 [${Q4_K_XL[1]}]=49720539552 [${Q4_K_XL[2]}]=32803030176 [${Q4_K_XL[3]}]=28800138432
+                 [$MMPROJ]=907543008)
+declare -A SHA=([${IQ3_S[0]}]=4c1eb2ceb4915e1192f4f386021897bde56a97f40a0bb78bb86465e0f7d2aca3
+                [${IQ3_S[1]}]=316b46f3a2dbd68c900f43136ab9449f9dcc3725dfd8c794847c204bc161e113
+                [${Q4_K_XL[0]}]=acc44040f74d0e55fb89c3967056cce5dbda1bcc52e909c3ba6fc72b5e9c0858
+                [${Q4_K_XL[1]}]=45792ae869072d8229384c51c7c73dd959e191505252b41dd71852d9746f5ce4
+                [${Q4_K_XL[2]}]=8c76e79d444b16a663d9c8db54e585ed3b1da13eebd2619c37b0c355da803c82
+                [${Q4_K_XL[3]}]=5de8b5dbf89409acc39468decafd4a4a95b13c29d88a14b0356107897829ec36
                 [$MMPROJ]=b1a82259702816a5330d7bd7607cd9676b11780e79ff7348c21103ff3ce49bd0)
 
-[ $# -ge 1 ] && [ "${1#-}" = "$1" ] || die "usage: bash setup.sh DATA [--models DIR] [--strata DIR] [--no-pictures] [--route-prior X] [--check]"
+[ $# -ge 1 ] && [ "${1#-}" = "$1" ] || die "usage: bash setup.sh DATA [--model iq3_s|q4_k_xl] [--models DIR] [--strata DIR] [--no-pictures] [--route-prior X] [--ram 96|64] [--check]"
 DATA=$1
 shift
-MODELS='' STRATA='' PICTURES=1 PRIOR=0 CHECK=0
+MODEL=iq3_s MODELS='' STRATA='' PICTURES=1 PRIOR=0 RAM=96 CHECK=0
 while [ $# -gt 0 ]; do
   case "$1" in
+    --model) MODEL=${2:?--model iq3_s or q4_k_xl}; [ "$MODEL" = iq3_s ] || [ "$MODEL" = q4_k_xl ] || die "--model: iq3_s or q4_k_xl"; shift 2 ;;
     --models) MODELS=${2:?--models DIR}; shift 2 ;;
     --strata) STRATA=${2:?--strata DIR}; shift 2 ;;
     --no-pictures) PICTURES=0; shift ;;
     --route-prior) PRIOR=${2:?--route-prior X}; shift 2 ;;
+    --ram) RAM=${2:?--ram 96 or 64}; [ "$RAM" = 96 ] || [ "$RAM" = 64 ] || die "--ram: 96 or 64"; shift 2 ;;
     --check) CHECK=1; shift ;;
     *) die "unknown option $1" ;;
   esac
 done
+[ "$RAM" = 96 ] || [ "$MODEL" = iq3_s ] || die "--ram 64: only with the IQ3_S file (UD-Q4_K_XL's experts alone are 72 GiB)"
 abspath() { case "$1" in /*) echo "$1" ;; *) echo "$PWD/$1" ;; esac; }
 DATA=$(abspath "$DATA")
 MODELS=$(abspath "${MODELS:-$DATA/models}")
@@ -60,7 +75,11 @@ STRATA=$(abspath "${STRATA:-$DATA/strata-v0.2.9}")
 PREP=$DATA/prep
 EXE=$HERE/build/split/strata-split-2
 GG=$HERE/third_party/llama.cpp
-NEEDED=("$SHARD1" "$SHARD2")
+declare -A URL=([$MMPROJ]=$ISTA/$MMPROJ)
+for f in "${IQ3_S[@]}"; do URL[$f]=$ISTA/$f; done
+for f in "${Q4_K_XL[@]}"; do URL[$f]=$UNSLOTH/$f; done
+if [ "$MODEL" = iq3_s ]; then NEEDED=("${IQ3_S[@]}"); else NEEDED=("${Q4_K_XL[@]}"); fi
+SHARD1=${NEEDED[0]}
 [ "$PICTURES" = 1 ] && NEEDED+=("$MMPROJ")
 TODO=0
 todo() { TODO=$((TODO + 1)); say "to do: $*"; }
@@ -86,8 +105,12 @@ else
   say "WARNING: no nvidia-smi; the profile names cards 0,1"
 fi
 mem_gib=$(awk '/^MemTotal:/ {print int($2 / 1048576)}' /proc/meminfo)
-if [ "$mem_gib" -lt 88 ]; then
-  say "WARNING: $mem_gib GiB of RAM; this engine needs 96 GB (about 85 GiB once loaded, more while loading)"
+if [ "$RAM" = 96 ] && [ "$MODEL" = q4_k_xl ] && [ "$mem_gib" -lt 88 ]; then
+  say "WARNING: $mem_gib GiB of RAM; UD-Q4_K_XL needs 96 GB; with 64 GB use the IQ3_S file and --ram 64"
+elif [ "$RAM" = 96 ] && [ "$mem_gib" -lt 88 ]; then
+  say "WARNING: $mem_gib GiB of RAM; this profile needs 96 GB (about 85 GiB once loaded, more while loading); with 64 GB use --ram 64"
+elif [ "$RAM" = 64 ] && [ "$mem_gib" -lt 60 ]; then
+  say "WARNING: $mem_gib GiB of RAM; the 64 GB mode needs 64 GB"
 else
   ok "$mem_gib GiB of RAM"
 fi
@@ -152,11 +175,11 @@ for f in "${NEEDED[@]}"; do
   if [ ! -f "$p" ]; then
     part=$p.part
     if [ "$(stat -L -c %s "$part" 2>/dev/null || echo 0)" != "${SIZE[$f]}" ]; then
-      say "downloading $f ($(gb "${SIZE[$f]}")) from $HF_REPO"
+      say "downloading $f ($(gb "${SIZE[$f]}")) from ${URL[$f]%/*}"
       auth=()
       [ -n "${HF_TOKEN:-}" ] && auth=(-H "Authorization: Bearer $HF_TOKEN")
       curl -L --fail --retry 5 --retry-delay 20 -C - ${auth[@]+"${auth[@]}"} -o "$part" \
-        "https://huggingface.co/$HF_REPO/resolve/$HF_REV/$f" || die "download of $f failed (run again to resume)"
+        "${URL[$f]}" || die "download of $f failed (run again to resume)"
     fi
     [ "$(stat -L -c %s "$part")" = "${SIZE[$f]}" ] || die "$part has $(stat -L -c %s "$part") bytes, not ${SIZE[$f]}"
     check_sha "$f" "$part" || die "$part does not match its SHA-256; delete it and run again"
@@ -234,7 +257,8 @@ else
   vis=()
   [ "$PICTURES" = 1 ] && vis=(--vision-exe "$VISION")
   python3 "$HERE/profile/fill_profile.py" --models "$MODELS" --mtp "$PREP/mtp-rt" --tokenizer "$PREP/tokenizer" \
-    ${vis[@]+"${vis[@]}"} --logs "$DATA/logs" --route-prior "$PRIOR" --gpu "$GPU_LIST" --exe "$EXE" --out "$CFG"
+    ${vis[@]+"${vis[@]}"} --logs "$DATA/logs" --model "$MODEL" --route-prior "$PRIOR" --ram "$RAM" --gpu "$GPU_LIST" --exe "$EXE" \
+    --out "$CFG"
 fi
 
 if [ "$CHECK" = 1 ]; then

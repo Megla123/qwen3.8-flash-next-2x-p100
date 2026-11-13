@@ -36,19 +36,26 @@ from pathlib import Path
 STRATA_V029 = "c62d5e3a15b40ea51c96aae9e8d36928965f53ab"   # Strata v0.2.9 (github.com/Niko1221/Strata)
 INPUT_PATHS = ("docs", "src", "tools/collect_profile_traces.py")
 
-# Our numbers (2 x Tesla P100 16 GB PCIe x16 Gen3, 2 x Xeon Bronze 3106, 96 GB DDR4; profile/ with FNX_ROUTE_PRIOR=0).
-# Writing: rounds split69 (arm b), split71 and split72 (arm a) on binary 2ef67b0e, whose writing path is the released
-# code; reading: round split73 (arm b) on the released binary 5ef3a6ae. "same" = the same input text as ours.
+# Our numbers (2 x Tesla P100 16 GB PCIe x16 Gen3, 2 x Xeon Bronze 3106, 96 GB DDR4; profile/ with FNX_ROUTE_PRIOR=0): this
+# benchmark on this release's engine (c213636c) as build.sh built it, each on a freshly loaded engine, 13 Nov 2026, one run each
+# (README, "Our numbers"). Keys: --ours, or the model the server reports (auto).
 REFERENCE = {
-    "fresh": ((66.74, 67.06), "tok/s", "same prompts"),
-    "edit_py": ((108.75, 109.05), "tok/s", "OTHER input: ours was a private 4.6 KB script"),
-    "edit_md": ((115.85, 115.9), "tok/s", "same input"),
-    "long_read": ((923.9, 923.9), "tok/s", "other text, same size"),
-    "long_write": ((56.3, 59.8), "tok/s", "other text"),
-    "image_first_s": ((2.6, 2.7), "s", "same picture"),
-    "image_write": ((52.4, 52.6), "tok/s", "sampled"),
+    "iq3_s": {   # the IQ3_S profile (512k); pictures were off in this run (our rounds: first answer 2.6-2.7 s, then 52.4-52.6)
+        "fresh": 66.63, "edit_py": 110.95, "edit_md": 116.0, "long_read": 953.9, "long_write": 61.8,
+        "medium": {6000: 700, 12000: 815, 18000: 853, 24000: 803, 36000: 941, 48000: 876, 72000: 904},
+        "image_first_s": 2.65, "image_write": 52.5,
+    },
+    "iq3_s_64gb": {   # the IQ3_S profile with --ram 64 (256k), in a 58 GiB memory cgroup, the lookup table cold
+        "fresh": 63.27, "edit_py": 93.55, "edit_md": 101.9, "long_read": 767.7, "long_write": 61.4,
+        "medium": {6000: 613, 12000: 717, 18000: 759, 24000: 710, 36000: 850, 48000: 783, 72000: 817},
+    },
+    "q4_k_xl": {   # the UD-Q4_K_XL profile (256k), short of RAM in this run (README, "Unsloth's UD-Q4_K_XL")
+        "fresh": 41.41, "edit_py": 45.3, "edit_md": 43.9, "long_read": 725.8, "long_write": 44.7,
+        "medium": {6000: 529, 12000: 671, 18000: 715, 24000: 668, 36000: 804, 48000: 617, 72000: 661},
+        "image_first_s": 4.81, "image_write": 40.5,   # from the run of our production engine c213636c (this build: 48.4 s, 39.8)
+    },
 }
-REFERENCE_MEDIUM = {6000: 659, 12000: 810, 18000: 834, 24000: 805, 36000: 909, 48000: 868, 72000: 883}   # split73 b, tok/s
+UNITS = {"image_first_s": "s"}
 
 FRESH = [
     "Razloži v približno 200 besedah, kako deluje hranilnik toplote v hiši in kako ga dimenzioniramo.",
@@ -222,13 +229,14 @@ def check_checkout(root):
         sys.exit(f"{root} has changes under {', '.join(INPUT_PATHS)}:\n{dirty}")
 
 
-def summary(results):
-    lines = ["", f"{'test':<16}{'yours':>10}{'ours':>16}  unit   input"]
+def summary(results, ours):
+    ref = REFERENCE[ours]
+    lines = ["", f"{'test':<16}{'yours':>10}{'ours':>10}  unit   (ours: {ours})"]
 
     def row(name, value, key):
-        (lo, hi), unit, note = REFERENCE[key]
-        ours = f"{lo:g}" if lo == hi else f"{lo:g}-{hi:g}"
-        lines.append(f"{name:<16}{'-' if value is None else f'{value:g}':>10}{ours:>16}  {unit:<6} {note}")
+        mine = ref.get(key)
+        lines.append(f"{name:<16}{'-' if value is None else f'{value:g}':>10}{'-' if mine is None else f'{mine:g}':>10}  "
+                     f"{UNITS.get(key, 'tok/s')}")
     r = results
     if "fresh" in r:
         row("fresh", r["fresh"].get("tok_s"), "fresh")
@@ -239,14 +247,23 @@ def summary(results):
         row("long read", r["long"].get("read_tok_s"), "long_read")
         row("long, write", r["long"].get("write_tok_s"), "long_write")
     if "medium" in r:
-        for chars, ref in REFERENCE_MEDIUM.items():
+        for chars, mine in ref["medium"].items():
             v = r["medium"].get(str(chars), {})
-            lines.append(f"{'medium ' + str(chars // 1000) + 'k ch':<16}{v.get('tok_s', '-'):>10}{ref:>16}  tok/s  other text "
+            lines.append(f"{'medium ' + str(chars // 1000) + 'k ch':<16}{v.get('tok_s', '-'):>10}{mine:>10}  tok/s  "
                          f"({v.get('read', '?')} tokens)")
     if "image" in r:
         row("image, first", r["image"].get("first_s"), "image_first_s")
         row("image, write", r["image"].get("write_tok_s"), "image_write")
     return "\n".join(lines)
+
+
+def which_reference(b):
+    """auto: q4_k_xl when the server's model name says so, else iq3_s (the 64 GB mode is chosen with --ours)."""
+    try:
+        ids = [m.get("id", "") for m in b.http("GET", "/v1/models", timeout=10).get("data", [])]
+    except Exception:
+        ids = []
+    return "q4_k_xl" if any("q4_k_xl" in i.lower() for i in ids) else "iq3_s"
 
 
 def main():
@@ -261,6 +278,8 @@ def main():
     ap.add_argument("--timeout", type=float, default=3600, help="seconds per request")
     ap.add_argument("--any-commit", action="store_true", help="skip the check that the checkout is v0.2.9")
     ap.add_argument("--dry-run", action="store_true", help="build the inputs and print their sizes; no server")
+    ap.add_argument("--ours", choices=["auto", *REFERENCE], default="auto",
+                    help="which of our runs to print beside yours (auto: by the model the server reports)")
     a = ap.parse_args()
 
     tests = [t.strip() for t in a.tests.split(",") if t.strip()]
@@ -284,14 +303,15 @@ def main():
         return
     if a.wait:
         b.wait_loaded(a.wait)
-    results = {"url": a.url, "started": time.strftime("%F %T"), "tests": tests}
+    ours = which_reference(b) if a.ours == "auto" else a.ours
+    results = {"url": a.url, "started": time.strftime("%F %T"), "tests": tests, "ours": ours}
     for t in tests:
         log(f"=== {t}")
         results[t] = getattr(b, t)()
     results["finished"] = time.strftime("%F %T")
     if a.out:
         Path(a.out).write_text(json.dumps(results, indent=1, ensure_ascii=False) + "\n", encoding="utf-8")
-    print(summary(results))
+    print(summary(results, ours))
 
 
 if __name__ == "__main__":

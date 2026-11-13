@@ -90,9 +90,14 @@ struct DW {
 // window's experts that are not in a slot take one of their pool's (CLOCK: the first slot not used since the pool's
 // hand last passed), copied in from RAM, and the layer's tables (LayerW gu_e.ep / down_e.ep: rows of ep_gu / ep_dn)
 // follow. All device memory; the same steps on every card.
+// FNX_EXPERT_DYN_GIB (from the M40 port, for 64 GB of RAM): only the coldest of the experts in VRAM keep a host copy
+// and take part in the pools (the dynamic ones); the hotter rest sit in VRAM for good outside every pool (slot numbers
+// n_dyn .. n_slots - 1, never a victim, never lent to K/V or the prompt path) and have no host copy, so RAM holds only
+// the experts the cards may give up.
 constexpr int EC_POOLS = 4;
 struct ExpertCache {
-    int n_slots = 0;                     // all pools'
+    int n_slots = 0;                     // all pools', then the permanent experts'
+    int n_dyn = 0;                       // the pools' slots: [0, n_dyn); the permanent experts' [n_dyn, n_slots)
     int n_pools = 0;
     int pool_of[NL] = {};                // each layer's pool
     int s0[EC_POOLS] = {}, n[EC_POOLS] = {};   // a pool's slots: [s0, s0 + n) of the slot numbers
@@ -199,10 +204,15 @@ struct CardW {
     size_t bytes = 0;                  // what the loader allocated
     size_t host_bytes = 0;             // routed experts' copies in RAM (page-locked, mapped)
     ExpertCache ec;                    // n_slots 0: every routed expert in VRAM at its DW's p
-    std::vector<const char*> ec_host_gu, ec_host_dn;   // ec.host_gu / host_dn on the host
+    std::vector<const char*> ec_host_gu, ec_host_dn;   // ec.host_gu / host_dn on the host (null: a permanent expert)
     std::vector<int> ec_owner0, ec_slot0;   // ec.owner / slot_of as loaded (an arena engine starts from them again)
     std::vector<void*> expert_mem;     // what Model::place_experts allocated (freed by free_experts)
     size_t expert_bytes = 0;
+    // FNX_EXPERT_DYN_GIB: where each permanent expert's gate|up and down sit in VRAM ([NL * NEXP], null: not permanent), their blocks
+    // (one gate|up and one down a layer, uploaded as the layer loads) and bytes
+    std::vector<const char*> perm_gu, perm_dn;
+    std::vector<void*> perm_mem;
+    size_t perm_bytes = 0;
 };
 
 // the draft (MTP) layer on one card: an attention layer (hc [0] before the attention, [1] before the MoE), its input
@@ -257,6 +267,9 @@ struct Model {
     // off: no cache) leaves the coldest G GiB of them (whole experts, all cards' slices) out, ranked by
     // FNX_EXPERT_PROFILE (FNX_ROUTE_COUNT's tallies; default data/expert-routes.bin)
     std::vector<std::vector<char>> resident;
+    // [NL][NEXP], empty: none. FNX_EXPERT_DYN_GIB=G: of the resident experts all but the coldest G GiB (whole experts, all cards'
+    // slices) are permanent: in VRAM for good, no host copy (each pool keeps FNX_EXPERT_DYN_MIN of its experts out of them)
+    std::vector<std::vector<char>> perm;
     int ram_extra = 0;                   // more of the coldest in RAM than FNX_EXPERT_RAM_GIB's (the engine, VRAM short)
     // the arena (the default; FNX_ARENA=0: none): every expert resident at the start, the largest pool's slots in the
     // engine's arena and lent to the K/V pool coldest first as it grows (score: the profile's, per byte; higher is hotter)

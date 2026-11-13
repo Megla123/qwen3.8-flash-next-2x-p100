@@ -45,9 +45,36 @@ says otherwise, the speed effects were measured on earlier builds of this engine
 | `FNX_QSA_SEL` | 1 | 0 | ours | attention selection: a lower bound from the top 1,024 first, then work on candidates only | none | reads at 279k → 505k tokens +14.2 %; below 60k in the noise |
 | `FNX_PF_PREP` | 1 | 0 | ours | `k_hcb_prep` loads a row's four streams before the first block sum | none | part of the 835 → 906 step |
 | `FNX_PF_STAGE_ALL`, `FNX_PF_STAGE_MIB`, `FNX_PF_TAIL_MIB` | 1, 1024, 3000 | 0, 384, 2450 | ours (`STAGE_MIB`: Strata) | while reading, the staging buffer holds every missing expert of the largest layer (568 MiB), so no expert is read across PCIe in place; `TAIL` must cover two staging buffers and the lent buffers | none | part of the 835 → 906 step |
+| `FNX_PF_SP` | 1 | 0 | ours | in a prompt pass of two chunks or more each card reads `hc` only for the rows of its own part of the ring and the cards trade the mixed rows through host memory; each layer's sums stop after their reduce-scatter (from 3,584 rows in the second chunk, `FNX_PF_SP_MIN`) | none | long read +4.4 %, deep reads +4.8 %, medium reads from 36k on +3.7-4.5 % (`split74`, `split75`) |
 
 **Trap:** `FNX_PF_WINDOWS` is a name the engine reserves for another model (27B) and stops on. The read-through-windows
 switch is `FNX_READ_WINDOWS`.
+
+## The 64 GB mode
+
+Off in the IQ3_S profile; `fill_profile.py --ram 64` (or `setup.sh --ram 64`) sets them, and the UD-Q4_K_XL profile uses the
+first two. They come from our port of this engine to two Tesla M40 with 30 GiB of RAM. README, "64 GB of RAM", has what
+they cost.
+
+| Switch | 64 GB profile | Unset | Origin | What it does | Output effect |
+|---|---|---|---|---|---|
+| `FNX_PLE_RAM` | 0 | 1 | ours | 0: the 26.8 GiB lookup table (`per_layer_token_embd`, the second shard) is not copied into RAM but read from the file through the page cache, as Strata's own engine does (random access, and each decode window or prompt chunk asks for its rows' pages at once with `MADV_WILLNEED`) | none |
+| `FNX_EXPERT_DYN_GIB` | 13 | unset | ours | of the experts in VRAM only the coldest N GiB keep a RAM copy and take part in the expert cache; the rest stay in VRAM for good with no RAM copy, so RAM holds `FNX_EXPERT_RAM_GIB` + N GiB of experts instead of all of them (IQ3_S: 48.8 GiB). The K/V pool (`FNX_ARENA`) and the prompt path (`FNX_PF_LEND`) borrow only those N GiB's slots: the load stops with a message when they cannot hold `--max-context` or the prompt buffers | none |
+| `FNX_EXPERT_DYN_MIN` | unset | 384 | ours | with `FNX_EXPERT_DYN_GIB`: at least this many experts of each expert size stay in the cache (a window's picks) | none |
+
+## The UD-Q4_K_XL profile
+
+`flash-next-q4_k_xl-256k.template.json` (`fill_profile.py --model q4_k_xl`) is the IQ3_S template with the changes below.
+README, "Unsloth's UD-Q4_K_XL", has what they gave.
+
+| Switch or argument | Q4 profile | IQ3_S profile | Why |
+|---|---|---|---|
+| `--max-context` | 262144, no YaRN | 524288, YaRN x2 | at 524,288 the load stops: the prompt path's two staging buffers need about 1.95 GiB a card (IQ3_S about 1), more than the lent slots leave |
+| `FNX_EXPERT_RAM_GIB` | 52.5 | 29.0 | 71.7 GiB of experts (IQ3_S 48.8); the rest sizes the VRAM slots as before |
+| `FNX_EXPERT_DYN_GIB`, `FNX_PLE_RAM` | 14, 0 | unset, 1 | the 64 GB mode's switches. With every expert pinned in RAM (73 GiB) 9 GiB of page cache were left for the 28.8 GB lookup table, and a 36k read ran at 146 tok/s. With 5.2 GiB of experts in VRAM for good (no RAM copy) and the table read through the page cache: 722-905 |
+| `FNX_PF_TAIL_MIB` | 4096 | 3000 | the bigger staging buffers |
+| `FNX_SH_IN` | 0 | unset (1) | ours: 0 sends the Q4_K layers through the P100 row kernel with the shared expert beside it, instead of Strata's decode kernels with the shared expert inside (writing +7 %; rounding) |
+| `FNX_PREFETCH_MIN_T` | 2 | 4 | next-layer copies from windows of 2 rows on: writing +2.6 %, writing after a long read +4.5 % (with IQ3_S: nothing) |
 
 ## Our other switches
 
@@ -70,6 +97,9 @@ Off, or at the value the engine picks, unless you set them. None is needed to re
 | `FNX_RR_FAST`, `FNX_RR_ORDER`, `FNX_RR_RQ4`, `FNX_PRIO` | off | router variants and stream priority (same bits, no gain) |
 | `FNX_MOE_X`, `FNX_MOE_XD` | off | IQ3_S decode expert kernels with the xmad dot product (same bits, no gain: those kernels are memory-bound) |
 | `FNX_PF_REFILL`, `FNX_PF_REFILL_BATCH` | off, 4 | refill the lent expert slots after a read (no gain) |
+| `FNX_PF_SP_MIN` | 3584 | with `FNX_PF_SP=1`: the rows a pass's second chunk needs for it; shorter passes run as before (their exchange would wait) |
+| `FNX_NUMA_EXPERTS` | off | 1: each card's RAM copy of the experts on the memory of the CPU the card hangs from (same bits; IQ3_S and Q4 in the noise) |
+| `FNX_PLE_WARM` | off | 1, with `FNX_PLE_RAM=0`: a thread reads the lookup table once after the load (Q4: writing −20 %, it pushes hot rows out of the page cache) |
 | `FNX_PF_DRAFT_WINDOW` | off | run the draft layer over a prompt's last N rows only |
 | `FNX_RR_TIMES`, `FNX_PA_CHECK`, `FNX_QSA_DUMP`, `FNX_QSA_DUMP_EVERY`, `FNX_QSA_DUMP_MAX`, `FNX_NVPROF_PASS`, `FNX_NVPROF_WIN`, `FNX_NVPROF_WINS` | off | diagnostics: router timings, kernel cross-checks, score dumps, `nvprof` capture of one prompt pass or a run of windows |
 

@@ -123,9 +123,86 @@ template <> struct RunWords<22> { static constexpr int n = 3; };
 template <> struct RunWords<16> { static constexpr int n = 3; };   // IQ2_XXS: the codes, the signs and scale word, d
 template <> struct RunWords<29> { static constexpr int n = 3; };   // IQ1_M: the codes, qh | the run's two scales << 16, d
 
+// ---- q4x_patch.py: the Q4 XL expert types. A run's words: [0..7] its 32 values one a byte (v < 1024), [8] d | dmin << 16 (K-quants),
+// d | m << 16 (Q5_1) or d (Q8_0), [9] the K-quant sub-block's scale | min << 8 (ggml get_scale_min_k4)
+template <> struct RunWords<12> { static constexpr int n = 10; };   // Q4_K
+template <> struct RunWords<13> { static constexpr int n = 10; };   // Q5_K
+template <> struct RunWords<7> { static constexpr int n = 9; };     // Q5_1
+template <> struct RunWords<8> { static constexpr int n = 9; };     // Q8_0
+template <int TY> inline constexpr bool kQX = TY == 12 || TY == 13 || TY == 7 || TY == 8;
+#define P100_U32(p, off) (P100_U16(p, off) | (P100_U16(p, (off) + 2) << 16))
+// bit b of the low nibble of x to bit 4 of byte b
+__device__ __forceinline__ uint32_t kq_spread4(uint32_t x) { return ((x & 1u) << 4) | ((x & 2u) << 11) | ((x & 4u) << 18) | ((x & 8u) << 25); }
+// run ib of the block (K-quants: its sub-block ib; Q5_1, Q8_0: the block itself) at x
+template <int TY>
+__device__ __forceinline__ void kq_words(const uint8_t* x, const int ib, uint32_t (&w)[RunWords<TY>::n]) {
+    if constexpr (TY == 12 || TY == 13) {
+        constexpr int QS = TY == 12 ? 16 : 48;
+        const int c = ib >> 1, sh = 4 * (ib & 1);
+#pragma unroll
+        for (int k = 0; k < 8; ++k) {
+            uint32_t v = (P100_U32(x, QS + 32 * c + 4 * k) >> sh) & 0x0F0F0F0Fu;
+            if constexpr (TY == 13) v |= ((P100_U32(x, 16 + 4 * k) >> ib) & 0x01010101u) << 4;
+            w[k] = v;
+        }
+        w[8] = P100_U32(x, 0);
+        const uint8_t* q = x + 4;
+        uint32_t s, m;
+        if (ib < 4) s = q[ib] & 63, m = q[ib + 4] & 63;
+        else s = (q[ib + 4] & 15) | ((q[ib - 4] >> 6) << 4), m = (q[ib + 4] >> 4) | ((q[ib] >> 6) << 4);
+        w[9] = s | (m << 8);
+    } else if constexpr (TY == 7) {
+        const uint32_t qh = P100_U32(x, 4);
+#pragma unroll
+        for (int k = 0; k < 4; ++k) {
+            const uint32_t q = P100_U32(x, 8 + 4 * k);
+            w[k] = (q & 0x0F0F0F0Fu) | kq_spread4((qh >> (4 * k)) & 15u);
+            w[k + 4] = ((q >> 4) & 0x0F0F0F0Fu) | kq_spread4((qh >> (16 + 4 * k)) & 15u);
+        }
+        w[8] = P100_U32(x, 0);
+    } else {
+#pragma unroll
+        for (int k = 0; k < 8; ++k) w[k] = P100_U32(x, 2 + 4 * k);
+        w[8] = P100_U16(x, 0);
+    }
+}
+// bytes b0, b1 of w (selector 0x4140: bytes 0 and 1, 0x4342: bytes 2 and 3) as the f16 pair (v0, v1), exact for v < 1024
+__device__ __forceinline__ half2 kq_h2(uint32_t w, uint32_t sel) {
+    return __hsub2(as_half2(__byte_perm(w, 0u, sel) | 0x64006400u), as_half2(0x64006400u));
+}
+template <int TY>
+__device__ __forceinline__ void kq_finish(const uint32_t (&w)[RunWords<TY>::n], uint4* __restrict__ out) {
+    if constexpr (TY == 12 || TY == 13) {   // d sc q - dmin m
+        const half2 a = dup_f(h2f(uint16_t(w[8])) * float(w[9] & 255u)), b = dup_f(-h2f(uint16_t(w[8] >> 16)) * float(w[9] >> 8));
+#pragma unroll
+        for (int j = 0; j < 4; ++j)
+            out[j] = make_uint4(as_u32(__hfma2(kq_h2(w[2 * j], 0x4140u), a, b)), as_u32(__hfma2(kq_h2(w[2 * j], 0x4342u), a, b)),
+                                as_u32(__hfma2(kq_h2(w[2 * j + 1], 0x4140u), a, b)), as_u32(__hfma2(kq_h2(w[2 * j + 1], 0x4342u), a, b)));
+    } else if constexpr (TY == 7) {   // d q + m
+        const half2 a = dup_u16(w[8] & 0xffffu), b = dup_u16(w[8] >> 16);
+#pragma unroll
+        for (int j = 0; j < 4; ++j)
+            out[j] = make_uint4(as_u32(__hfma2(kq_h2(w[2 * j], 0x4140u), a, b)), as_u32(__hfma2(kq_h2(w[2 * j], 0x4342u), a, b)),
+                                as_u32(__hfma2(kq_h2(w[2 * j + 1], 0x4140u), a, b)), as_u32(__hfma2(kq_h2(w[2 * j + 1], 0x4342u), a, b)));
+    } else {   // d q: an int8 plus 128 as above, then 1152 off
+        const half2 a = dup_u16(w[8]), o = as_half2(0x64806480u);
+#pragma unroll
+        for (int j = 0; j < 4; ++j) {
+            const uint32_t u0 = w[2 * j] ^ 0x80808080u, u1 = w[2 * j + 1] ^ 0x80808080u;
+            const half2 q0 = __hsub2(as_half2(__byte_perm(u0, 0u, 0x4140u) | 0x64006400u), o), q1 = __hsub2(as_half2(__byte_perm(u0, 0u, 0x4342u) | 0x64006400u), o);
+            const half2 q2 = __hsub2(as_half2(__byte_perm(u1, 0u, 0x4140u) | 0x64006400u), o), q3 = __hsub2(as_half2(__byte_perm(u1, 0u, 0x4342u) | 0x64006400u), o);
+            out[j] = make_uint4(as_u32(__hmul2(q0, a)), as_u32(__hmul2(q1, a)), as_u32(__hmul2(q2, a)), as_u32(__hmul2(q3, a)));
+        }
+    }
+}
+
 template <int TY>
 __device__ __forceinline__ void run_load(const uint8_t* __restrict__ row, const int run, uint32_t (&w)[RunWords<TY>::n]) {
-    if constexpr (TY == 18) {   // IQ3_XXS
+    if constexpr (TY == 12 || TY == 13) {   // q4x_patch.py
+        kq_words<TY>(row + (run >> 3) * (TY == 12 ? 144 : 176), run & 7, w);
+    } else if constexpr (TY == 7 || TY == 8) {
+        kq_words<TY>(row + run * (TY == 7 ? 24 : 34), 0, w);
+    } else if constexpr (TY == 18) {   // IQ3_XXS
         const block_iq3_xxs* x = reinterpret_cast<const block_iq3_xxs*>(row) + (run >> 3);
         const int ib = run & 7;
         w[0] = P100_U16(x->qs, 8 * ib); w[1] = P100_U16(x->qs, 8 * ib + 2); w[2] = P100_U16(x->qs, 8 * ib + 4); w[3] = P100_U16(x->qs, 8 * ib + 6);
@@ -180,7 +257,9 @@ __device__ __forceinline__ uint32_t nib_pair(const Tabs& t, const uint32_t v, co
 
 template <int TY>
 __device__ __forceinline__ void run_finish(const Tabs& t, const uint32_t (&w)[RunWords<TY>::n], uint4* __restrict__ out) {
-    if constexpr (TY == 18) {
+    if constexpr (kQX<TY>) {
+        kq_finish<TY>(w, out);   // q4x_patch.py
+    } else if constexpr (TY == 18) {
         const uint32_t aux = w[4];
         const half2 dd = dup_f(h2f(uint16_t(w[5])) * float(1 + 2 * (aux >> 28)) * 0.25f);
 #pragma unroll
@@ -344,13 +423,17 @@ __global__ void gemm_kernel(Args a) {
 // ---- gemm4: a lane owns a row.  A warp reading 2-byte fields of 32 different rows fetches a cache line for each: 47 times the traffic of the
 // weights, which on the card's L2 costs as much as the products.  So a lane first reads its row's next IQ block with aligned 16-byte loads into
 // shared memory (the bytes in flight, one round trip) and decodes from there.
-template <int TY> inline constexpr int kSU = TY == 23 ? 10 : TY == 18 || TY == 21 ? 8 : TY == 22 ? 7 : TY == 20 || TY == 2 ? 6 : TY == 16 || TY == 29 ? 5 : 4;
-template <int TY> inline constexpr int kRunsGr = TY == 20 || TY == 2 || TY == 42 ? 4 : 8;
-template <int TY> inline constexpr int kGrBytes = TY == 18 ? 98 : TY == 21 ? 110 : TY == 22 ? 82 : TY == 23 ? 136 : TY == 20 || TY == 2 ? 72 : TY == 16 ? 66 : TY == 29 ? 56 : 36;
+template <int TY> inline constexpr int kSU = TY == 12 ? 10 : TY == 13 ? 12 : TY == 7 ? 7 : TY == 8 ? 10 : TY == 23 ? 10 : TY == 18 || TY == 21 ? 8 : TY == 22 ? 7 : TY == 20 || TY == 2 ? 6 : TY == 16 || TY == 29 ? 5 : 4;
+template <int TY> inline constexpr int kRunsGr = TY == 20 || TY == 2 || TY == 42 || TY == 7 || TY == 8 ? 4 : 8;
+template <int TY> inline constexpr int kGrBytes = TY == 12 ? 144 : TY == 13 ? 176 : TY == 7 ? 96 : TY == 8 ? 136 : TY == 18 ? 98 : TY == 21 ? 110 : TY == 22 ? 82 : TY == 23 ? 136 : TY == 20 || TY == 2 ? 72 : TY == 16 ? 66 : TY == 29 ? 56 : 36;
 
 template <int TY>
 __device__ __forceinline__ void run_load_s(const uint8_t* p, const int run, uint32_t (&w)[RunWords<TY>::n]) {
-    if constexpr (TY == 18) {
+    if constexpr (TY == 12 || TY == 13) {   // q4x_patch.py: a group is one super-block
+        kq_words<TY>(p, run & 7, w);
+    } else if constexpr (TY == 7 || TY == 8) {   // four blocks
+        kq_words<TY>(p + (run & 3) * (TY == 7 ? 24 : 34), 0, w);
+    } else if constexpr (TY == 18) {
         const block_iq3_xxs* x = reinterpret_cast<const block_iq3_xxs*>(p);
         const int ib = run & 7;
         w[0] = P100_U16(x->qs, 8 * ib); w[1] = P100_U16(x->qs, 8 * ib + 2); w[2] = P100_U16(x->qs, 8 * ib + 4); w[3] = P100_U16(x->qs, 8 * ib + 6);
@@ -423,10 +506,16 @@ template <> struct TabU<22> { static constexpr int n = 256; };
 template <> struct TabU<42> { static constexpr int n = 128; };
 template <> struct TabU<16> { static constexpr int n = 384; };   // IQ2_XXS: its grid (256), the 7-bit signs (128)
 template <> struct TabU<29> { static constexpr int n = 8; };     // IQ1_M: its 64 KB of grids stay in global memory
+// q4x_patch.py: no tables, and none of their room either: Q8_0's 256-lane job kernels (down's mode 5) need exactly Pascal's 48 KiB
+template <> struct TabU<12> { static constexpr int n = 0; };
+template <> struct TabU<13> { static constexpr int n = 0; };
+template <> struct TabU<7> { static constexpr int n = 0; };
+template <> struct TabU<8> { static constexpr int n = 0; };
 
 template <int TY>
 __device__ __forceinline__ void stage_tabs(const Tabs& t, uint4* tab, const int tid, const int nt) {
-    if constexpr (TY == 18) {
+    if constexpr (kQX<TY>) {   // q4x_patch.py: no tables
+    } else if constexpr (TY == 18) {
         for (int i = tid; i < 128; i += nt) tab[i] = __ldg(reinterpret_cast<const uint4*>(t.g3xxs) + i);
         for (int i = tid; i < 128; i += nt) tab[128 + i] = __ldg(t.sign7 + i);
     } else if constexpr (TY == 21) {
@@ -453,7 +542,9 @@ __device__ __forceinline__ uint32_t nib_pair_s(const uint32_t* nib, const uint32
 // run_finish with the tables at hand (IQ2_S's 16 KB grid stays in global memory, its 4 lookups in flight together)
 template <int TY>
 __device__ __forceinline__ void finish_s(const uint4* tab, const Tabs& t, const uint32_t (&w)[RunWords<TY>::n], uint4* out) {
-    if constexpr (TY == 18) {
+    if constexpr (kQX<TY>) {
+        kq_finish<TY>(w, out);   // q4x_patch.py
+    } else if constexpr (TY == 18) {
         const uint2* grid = reinterpret_cast<const uint2*>(tab);
         const uint4* sign = tab + 128;
         const uint32_t aux = w[4];

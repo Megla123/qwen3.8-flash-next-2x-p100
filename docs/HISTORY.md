@@ -25,7 +25,9 @@ digits of each binary's SHA-256.
 | 11 Nov | `1882468e` | crash fix: the conversation cache picked a conversation or checkpoint by an index that parking the current one had just moved (a `segfault` in `load_state`, 9 times since 9 Nov) | |
 | 11 Nov | `b1438fe1` | the prompt path stages every missing expert of a layer instead of reading some across PCIe; next-step loads ahead in the expert kernel; 64-row tiles for `down` (`FNX_PF_JOBV=6`, `FNX_PF_STAGE_ALL`, `FNX_PF_PREP`) | long read 835 → 906 (+8.5 %), medium reads +6-8 % |
 | 12 Nov | `2ef67b0e` | the byte dot product in one of three exact forms (`vmad`, `prmt`+`xmad`, the compiler's), chosen per kernel and window size | edits +3.3 %, fresh +0.7 % |
-| 12 Nov | **`5ef3a6ae`** | the prompt expert kernel with two weight buffers (`FNX_PF_JOBV=7`); also the code of two router and `hc` ideas that gave nothing (off) | long read +0.6 %; **this release** |
+| 12 Nov | `5ef3a6ae` | the prompt expert kernel with two weight buffers (`FNX_PF_JOBV=7`); also the code of two router and `hc` ideas that gave nothing (off) | long read +0.6 %; the first release |
+| 12 Nov | `bf9c7f1f` | each card reads `hc` only for its own rows of a prompt pass and the cards trade the mixed rows (`FNX_PF_SP`) | long read 920 → 961 (+4.4 %), deep +4.8 %, medium reads from 36k +3.7-4.5 % |
+| 13 Nov | **`c213636c`** | P100 kernels for UD-Q4_K_XL's expert types (Q4_K, Q5_K, Q5_1, Q8_0) and `FNX_SH_IN`; the 64 GB mode (`FNX_PLE_RAM`, `FNX_EXPERT_DYN_GIB`, written in this repository); two RAM placement ideas that gave nothing (`FNX_NUMA_EXPERTS`, `FNX_PLE_WARM`, off) | UD-Q4_K_XL: a 36k read 146 → 722-905 tok/s, fresh writing 52.6; IQ3_S unchanged; **this release** |
 
 ## Tried and dropped
 
@@ -48,7 +50,7 @@ Kept in the code where it was cheap, off by default (see [SWITCHES.md](SWITCHES.
 
 ## The patch scripts
 
-`history/patches/` holds the scripts of the last steps (11-12 Nov) as they were run on our build machine. They edit the
+`history/patches/` holds the scripts of the last steps (11-13 Nov) as they were run on our build machine. They edit the
 development tree in place and name its paths, so they will not run elsewhere, and their changes are already in `engine/`.
 `gen_iq3s_x.sh` there is the original of `scripts/gen_iq3s_x.sh`. The full change against Strata is
 [upstream-v0.2.10.diff](upstream-v0.2.10.diff).

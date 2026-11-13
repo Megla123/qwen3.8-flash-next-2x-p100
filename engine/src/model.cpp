@@ -31,6 +31,7 @@
 #include <thread>
 #include <atomic>
 #include <malloc.h>
+#include <sys/syscall.h>
 #include <map>
 #include <mutex>
 
@@ -52,6 +53,40 @@ std::string card_bdf(int dev) {
         throw std::runtime_error("card " + std::to_string(dev) + ": " + e.what());
     }
 }
+// FNX_NUMA_EXPERTS (numa_patch.py): the NUMA node of a card's PCI slot, -1 when sysfs names none
+int card_numa_node(int dev) {
+    std::ifstream f("/sys/bus/pci/devices/" + card_bdf(dev) + "/numa_node");
+    int n = -1;
+    if (!(f >> n)) n = -1;
+    return n;
+}
+// a node's room for page-locked memory: its free and file-backed (reclaimable) bytes from its meminfo, less its CMA pageblocks
+// (/proc/zoneinfo's cma, pages): pinned pages never come from those (ai-streznik: 8.6 GiB of node 1, 2.5 of node 0), so without
+// them MPOL_BIND could reclaim the node and still come up short (Strata PR #5436 met the same)
+size_t numa_node_room(int node) {
+    std::ifstream f("/sys/devices/system/node/node" + std::to_string(node) + "/meminfo");
+    std::string line;
+    size_t kb = 0;
+    while (std::getline(f, line)) {
+        char key[64];
+        unsigned long long v = 0;
+        if (std::sscanf(line.c_str(), "Node %*d %63[^:]: %llu", key, &v) == 2 &&
+            (!std::strcmp(key, "MemFree") || !std::strcmp(key, "Active(file)") || !std::strcmp(key, "Inactive(file)")))
+            kb += v;
+    }
+    std::ifstream z("/proc/zoneinfo");
+    size_t cma_pages = 0;
+    bool mine = false;
+    while (std::getline(z, line)) {
+        int n = -1;
+        unsigned long long v = 0;
+        if (std::sscanf(line.c_str(), "Node %d, zone", &n) == 1) mine = n == node;
+        else if (mine && std::sscanf(line.c_str(), " cma %llu", &v) == 1) cma_pages += v;
+    }
+    const size_t bytes = kb << 10, cma = cma_pages * 4096;
+    return bytes > cma ? bytes - cma : 0;
+}
+size_t g_numa_bound[2], g_numa_pref[2];   // per card: bytes allocated under MPOL_BIND, under MPOL_PREFERRED
 // the ring stores straight into the next card's memory: with translated IOMMU domains every such write faults
 // (dmesg: "DMAR: ... PTE Write access is not set") and the first window ends in a ring timeout that names nothing.
 // Each card's IOMMU group must be identity (boot with iommu=pt); a card whose iommu_group link is absent has no IOMMU
@@ -305,30 +340,71 @@ struct Up {
             return tmp.data();
         }
         void* hp = nullptr;
+        // FNX_NUMA_EXPERTS=1 (numa_patch.py): on the card's own socket (MPOL_BIND while the node has room, else MPOL_PREFERRED)
+        static const bool numa = env_int("FNX_NUMA_EXPERTS", 0) != 0;
+        const int node = numa && !store ? card_numa_node(c.dev) : -1;
+        if (node >= 0 && node < 64) {
+            const unsigned long mask = 1ul << node;
+            const bool bind = numa_node_room(node) > bytes + ((size_t) 4 << 30);
+            if (syscall(SYS_set_mempolicy, bind ? 2 /* MPOL_BIND */ : 1 /* MPOL_PREFERRED */, &mask, 8 * sizeof mask) != 0)
+                throw std::runtime_error(std::string("FNX_NUMA_EXPERTS: set_mempolicy: ") + std::strerror(errno));
+            (bind ? g_numa_bound : g_numa_pref)[c.dev & 1] += bytes;
+        }
         const cudaError_t err = store ? (hp = store->host(c.dev, bytes), cudaSuccess) : cudaHostAlloc(&hp, bytes, cudaHostAllocMapped);
+        if (node >= 0 && node < 64) syscall(SYS_set_mempolicy, 0 /* MPOL_DEFAULT */, nullptr, 0);
         if (err != cudaSuccess)
             throw std::runtime_error("place: " + std::to_string(bytes >> 20) + " MiB of page-locked host memory for experts: " +
                                      cudaGetErrorString(err));
         c.host_bytes += bytes;
         return (uint8_t*) hp;
     }
-    // routed experts (h from expert_buf: every expert's matrix, stride bytes apart): to VRAM at p, or with an
-    // ExpertCache each one's address in host_of (the layer's row of the card's host addresses)
-    void place(DW& w, const uint8_t* h, size_t bytes, size_t stride, const char** host_of) {
+    // n routed experts of stride bytes each, copy(e, dst) writing expert e: to VRAM at w.p, or with an ExpertCache each one's
+    // address in host_of (the layer's row of the card's host addresses). perm (the layer's row of Model::perm, FNX_EXPERT_DYN_GIB):
+    // those go to a VRAM block of their own (perm_at[e], host_of[e] null) and only the others to page-locked host memory
+    template <typename F>
+    void experts(DW& w, size_t stride, int n, const char** host_of, const char* perm, const char** perm_at, F&& copy) {
+        std::vector<uint8_t> tmp;
         if (!host_of) {
-            w.p = put<uint8_t>(h, bytes);
+            uint8_t* h = expert_buf((size_t) n * stride, nullptr, tmp);
+            for (int e = 0; e < n; ++e) copy(e, h + (size_t) e * stride);
+            w.p = put<uint8_t>(h, (size_t) n * stride);
             return;
         }
-        void* dp = nullptr;
-        if (store) dp = (void*) h;   // the shared host memory has one address for the CPU and the cards
-        else ck(cudaHostGetDevicePointer(&dp, (void*) h, 0), "place: mapped pointer");
-        for (size_t e = 0; e < bytes / stride; ++e) host_of[e] = (const char*) dp + e * stride;
+        int np = 0;
+        if (perm)
+            for (int e = 0; e < n; ++e) np += perm[e] ? 1 : 0;
+        if (np && store) throw std::runtime_error("experts: the holder keeps every expert's host copy (no FNX_EXPERT_DYN_GIB)");
+        std::vector<uint8_t> pt((size_t) np * stride);
+        uint8_t* h = np < n ? expert_buf((size_t) (n - np) * stride, host_of, tmp) : nullptr;
+        for (int e = 0, kh = 0, kp = 0; e < n; ++e) copy(e, np && perm[e] ? &pt[(size_t) kp++ * stride] : h + (size_t) kh++ * stride);
+        char* dp = nullptr;
+        if (h) {
+            if (store) dp = (char*) h;   // the shared host memory has one address for the CPU and the cards
+            else ck(cudaHostGetDevicePointer((void**) &dp, (void*) h, 0), "place: mapped pointer");
+        }
+        char* vp = nullptr;
+        if (np) {
+            ck(cudaMalloc((void**) &vp, pt.size()), "experts: the permanent ones' block");
+            ck(cudaMemcpy(vp, pt.data(), pt.size(), cudaMemcpyHostToDevice), "experts: the permanent ones' upload");
+            c.perm_mem.push_back(vp);
+            c.perm_bytes += pt.size();
+            c.bytes += pt.size();
+        }
+        for (int e = 0, kh = 0, kp = 0; e < n; ++e)
+            if (np && perm[e]) {
+                host_of[e] = nullptr;
+                perm_at[e] = vp + (size_t) kp++ * stride;
+            } else {
+                host_of[e] = dp + (size_t) kh++ * stride;
+            }
     }
     // the card's ExpertCache: a slot for each resident expert (res) in its size's pool, filled from its host copy; the
     // layers' tables. With arena_score (FNX_ARENA) the largest pool's slots go coldest first and are neither allocated
-    // nor filled here: the engine puts them in its arena (Engine::arena_fill); until then its experts point at RAM
+    // nor filled here: the engine puts them in its arena (Engine::arena_fill); until then its experts point at RAM.
+    // perm (FNX_EXPERT_DYN_GIB): those experts are in VRAM already (c.perm_gu / perm_dn) and take no pool slot: their slot
+    // numbers follow the pools' (n_dyn and on), so a hit finds them and no CLOCK hand, lend or copy ever reaches them
     void expert_cache(const std::vector<std::vector<char>>& res, const std::vector<const char*>& hgu, const std::vector<const char*>& hdn,
-                      const std::vector<double>* arena_score) {
+                      const std::vector<double>* arena_score, const std::vector<std::vector<char>>& perm = {}) {
         ExpertCache& ec = c.ec;
         std::vector<std::pair<size_t, size_t>> sizes;   // each pool's (gate|up, down) bytes
         for (int l = 0; l < NL; ++l) {
@@ -353,12 +429,13 @@ struct Up {
             }
         }
         std::vector<int> owner, slot_of((size_t) NL * NEXP, -1);
+        auto permanent = [&](int l, int e) { return !perm.empty() && perm[(size_t) l][(size_t) e]; };
         for (int p = 0; p < ec.n_pools; ++p) {
             ec.s0[p] = (int) owner.size();
             for (int l = 0; l < NL; ++l)
                 if (ec.pool_of[l] == p)
                     for (int e = 0; e < NEXP; ++e)
-                        if (res[(size_t) l][(size_t) e]) owner.push_back(l * NEXP + e);
+                        if (res[(size_t) l][(size_t) e] && !permanent(l, e)) owner.push_back(l * NEXP + e);
             if (p == ec.arena_pool)
                 std::stable_sort(owner.begin() + ec.s0[p], owner.end(),
                                  [&](int a, int b) { return (*arena_score)[(size_t) a] < (*arena_score)[(size_t) b]; });
@@ -374,10 +451,26 @@ struct Up {
             if (track) track->push_back(ec.pool[p]);
             c.bytes += (size_t) ec.n[p] * ec.slot_bytes[p];
         }
+        ec.n_dyn = (int) owner.size();
+        std::vector<const char*> epg(hgu), epd(hdn);
+        if (!perm.empty()) {   // the permanent experts: slot numbers after the pools', their VRAM blocks' addresses
+            if (c.perm_gu.size() != (size_t) NL * NEXP || c.perm_dn.size() != (size_t) NL * NEXP)
+                throw std::runtime_error("expert cache: the permanent experts were not placed");
+            for (int l = 0; l < NL; ++l)
+                for (int e = 0; e < NEXP; ++e)
+                    if (permanent(l, e)) {
+                        const size_t i = (size_t) l * NEXP + e;
+                        if (!res[(size_t) l][(size_t) e] || !c.perm_gu[i] || !c.perm_dn[i] || hgu[i] || hdn[i])
+                            throw std::runtime_error("expert cache: a permanent expert with a host copy or without its VRAM block");
+                        slot_of[i] = (int) owner.size();
+                        owner.push_back((int) i);
+                        epg[i] = c.perm_gu[i];
+                        epd[i] = c.perm_dn[i];
+                    }
+        }
         ec.n_slots = (int) owner.size();
         ec.arena_full = arena_score && ec.n_slots == NL * NEXP;
-        std::vector<const char*> epg(hgu), epd(hdn);
-        for (int s = 0; s < ec.n_slots; ++s) {
+        for (int s = 0; s < ec.n_dyn; ++s) {
             const int i = owner[(size_t) s], p = ec.pool_of[i / NEXP];
             if (p == ec.arena_pool) continue;
             const LayerW& L = c.L[(size_t) (i / NEXP)];
@@ -623,7 +716,8 @@ struct Up {
         return w;
     }
     // per expert: rows [r0, r1) of t1 then of t2 (gate; up), expert-major
-    DW expert_rows2(const Tensor& t1, const Tensor& t2, int r0, int r1, size_t& stride, const char** host_of = nullptr) {
+    DW expert_rows2(const Tensor& t1, const Tensor& t2, int r0, int r1, size_t& stride, const char** host_of = nullptr,
+                    const char* perm = nullptr, const char** perm_at = nullptr) {
         if (t1.type != t2.type || t1.ne[0] != t2.ne[0] || t1.ne[2] != t2.ne[2]) throw std::runtime_error(t1.name + " and " + t2.name + " do not stack");
         row_range(t1, r0, r1);
         row_range(t2, r0, r1);
@@ -634,14 +728,10 @@ struct Up {
         w.row_bytes = t1.row_bytes();
         stride = (size_t) w.n_out * w.row_bytes;
         const size_t half = (size_t) (r1 - r0) * w.row_bytes, src_mat = (size_t) t1.ne[1] * w.row_bytes;
-        std::vector<uint8_t> tmp;
-        const size_t bytes = (size_t) t1.ne[2] * stride;
-        uint8_t* h = expert_buf(bytes, host_of, tmp);
-        for (int64_t e = 0; e < t1.ne[2]; ++e) {
-            std::memcpy(&h[e * stride], t1.data + e * src_mat + (size_t) r0 * w.row_bytes, half);
-            std::memcpy(&h[e * stride + half], t2.data + e * src_mat + (size_t) r0 * w.row_bytes, half);
-        }
-        place(w, h, bytes, stride, host_of);
+        experts(w, stride, (int) t1.ne[2], host_of, perm, perm_at, [&](int64_t e, uint8_t* dst) {
+            std::memcpy(dst, t1.data + e * src_mat + (size_t) r0 * w.row_bytes, half);
+            std::memcpy(dst + half, t2.data + e * src_mat + (size_t) r0 * w.row_bytes, half);
+        });
         return w;
     }
     // f32 tensors' rows one after another
@@ -672,7 +762,8 @@ struct Up {
         return put<uint16_t>(h.data(), h.size() * 2);
     }
     // per expert: every row, input blocks [b0, b1) (down), expert-major
-    DW expert_cols(const Tensor& t, int b0, int b1, size_t& stride, const char** host_of = nullptr) {
+    DW expert_cols(const Tensor& t, int b0, int b1, size_t& stride, const char** host_of = nullptr, const char* perm = nullptr,
+                   const char** perm_at = nullptr) {
         const TypeInfo ti = block32(t);
         DW w;
         w.type = t.type;
@@ -684,13 +775,10 @@ struct Up {
         if (b0 < 0 || b1 <= b0 || (size_t) b1 * ti.bytes > src_row)
             throw std::runtime_error(t.name + ": blocks [" + std::to_string(b0) + ", " + std::to_string(b1) + ") asked for, a row has " +
                                      std::to_string(src_row / ti.bytes));
-        std::vector<uint8_t> tmp;
-        const size_t bytes = (size_t) t.ne[2] * stride;
-        uint8_t* h = expert_buf(bytes, host_of, tmp);
-        for (int64_t e = 0; e < t.ne[2]; ++e)
+        experts(w, stride, (int) t.ne[2], host_of, perm, perm_at, [&](int64_t e, uint8_t* dst) {
             for (int r = 0; r < w.n_out; ++r)
-                std::memcpy(&h[e * stride + (size_t) r * w.row_bytes], t.data + e * src_mat + (size_t) r * src_row + (size_t) b0 * ti.bytes, w.row_bytes);
-        place(w, h, bytes, stride, host_of);
+                std::memcpy(dst + (size_t) r * w.row_bytes, t.data + e * src_mat + (size_t) r * src_row + (size_t) b0 * ti.bytes, w.row_bytes);
+        });
         return w;
     }
 };
@@ -791,11 +879,16 @@ void load_layers_27b(Stager& st, CardW& c, Up& up, const std::vector<int>& conv_
 
 // The tensors come from st: group l is layer l's, group NL the output head's (stage_groups); each group is given back
 // once this card is through with it.
-// host_experts: every routed expert to a host copy (an ExpertCache, or the lab's holder); store: the holder's shared memory
+// host_experts: every routed expert to a host copy (an ExpertCache, or the lab's holder); store: the holder's shared memory.
+// perm (FNX_EXPERT_DYN_GIB): those experts to VRAM for good as their layer loads, with no host copy
 void load_card(Stager& st, CardW& c, const std::vector<std::vector<char>>& resident, const std::vector<double>* arena_score,
-               Store* store, bool host_experts) {
+               Store* store, bool host_experts, const std::vector<std::vector<char>>& perm = {}) {
     ck(cudaSetDevice(c.dev), "cudaSetDevice");
     Up up{c, store};
+    if (!perm.empty()) {
+        c.perm_gu.assign((size_t) NL * NEXP, nullptr);
+        c.perm_dn.assign((size_t) NL * NEXP, nullptr);
+    }
     auto L = [&](int l, const char* s) -> const Tensor& { return st.t(l, "blk." + std::to_string(l) + "." + s); };
     // recurrent channel lists: q, k for this card's key heads; v for its value heads (s * NKH + k)
     std::vector<int> qch, kch, vch, vblocks;
@@ -891,8 +984,11 @@ void load_card(Stager& st, CardW& c, const std::vector<std::vector<char>>& resid
             w.idx_qn = up.f32(L(l, "indexer.q_norm.weight"), QSA_KEY);
             w.idx_kn = up.f32(L(l, "indexer.k_norm.weight"), QSA_KEY);
         }
-        w.gu_e = up.expert_rows2(L(l, "ffn_gate_exps.weight"), L(l, "ffn_up_exps.weight"), c.ff0, c.ff1, w.gu_e_stride, hg);
-        w.down_e = up.expert_cols(L(l, "ffn_down_exps.weight"), c.ff0 / 32, c.ff1 / 32, w.down_e_stride, hd);
+        const char* pr = perm.empty() ? nullptr : perm[(size_t) l].data();
+        w.gu_e = up.expert_rows2(L(l, "ffn_gate_exps.weight"), L(l, "ffn_up_exps.weight"), c.ff0, c.ff1, w.gu_e_stride, hg, pr,
+                                 pr ? c.perm_gu.data() + (size_t) l * NEXP : nullptr);
+        w.down_e = up.expert_cols(L(l, "ffn_down_exps.weight"), c.ff0 / 32, c.ff1 / 32, w.down_e_stride, hd, pr,
+                                  pr ? c.perm_dn.data() + (size_t) l * NEXP : nullptr);
         w.sh_gu = up.dense(up.rows2(L(l, "ffn_gate_shexp.weight"), range(c.ff0, c.ff1), L(l, "ffn_up_shexp.weight"), range(c.ff0, c.ff1)));
         w.sh_down = up.dense(up.cols(L(l, "ffn_down_shexp.weight"), range(c.ff0 / 32, c.ff1 / 32)));
         if (!w.sh_gu.s.q || !w.sh_down.s.q) throw std::runtime_error("fnx: the shared expert is not Q8_0");
@@ -927,7 +1023,7 @@ void load_card(Stager& st, CardW& c, const std::vector<std::vector<char>>& resid
     if (!resident.empty()) {   // tracked, so the engine can place them again with more in RAM (Engine: VRAM short)
         const size_t before = c.bytes;
         Up ue{c, store, &c.expert_mem};
-        ue.expert_cache(resident, hgu, hdn, arena_score);
+        ue.expert_cache(resident, hgu, hdn, arena_score, perm);
         c.expert_bytes = c.bytes - before;
     } else if (host_experts) c.ec_host_gu = hgu, c.ec_host_dn = hdn;   // the holder: placed by a worker
 }
@@ -1472,7 +1568,7 @@ Model::Model(const std::string& path, Load how, Store* store, const std::string*
         th.emplace_back([&, c] {
             try {
                 load_card(st, cards[c], resident, arena ? &score : nullptr, how == Load::HOLD ? store : nullptr,
-                          how == Load::HOLD || !resident.empty());
+                          how == Load::HOLD || !resident.empty(), perm);
             } catch (const std::exception& e) {
                 errs[c] = e.what();
                 st.abort("card " + std::to_string(c) + " failed");   // the other cards wait on groups no one gives back
@@ -1492,6 +1588,7 @@ Model::Model(const std::string& path, Load how, Store* store, const std::string*
 void Model::choose_residency() {
     resident.clear();
     score.clear();
+    perm.clear();
     // prod's settings are the defaults: the arena, the coldest 3 GiB of experts in RAM, ranked by
     // data/expert-routes.bin (expert use tallied over an agentic code-review panel).
     // FNX_ARENA=0 and FNX_EXPERT_RAM_GIB=off together: every expert in VRAM, no expert cache
@@ -1509,6 +1606,8 @@ void Model::choose_residency() {
             throw std::runtime_error(std::string("fnx: FNX_EXPERT_RAM_GIB: GiB (0 or more) or off, not '") + ram_s + "'");
     }
     if (arena && !cache) throw std::runtime_error("fnx: FNX_EXPERT_RAM_GIB=off needs FNX_ARENA=0 (the arena lends the cache's slots)");
+    const char* dyn_s = std::getenv("FNX_EXPERT_DYN_GIB");
+    if (dyn_s && !cache) throw std::runtime_error("fnx: FNX_EXPERT_DYN_GIB needs the expert cache (FNX_EXPERT_RAM_GIB not off)");
     if (cache) {
         const double want = ram_gib * (double) (1ull << 30);
         const char* prof_s = std::getenv("FNX_EXPERT_PROFILE");
@@ -1571,12 +1670,51 @@ void Model::choose_residency() {
                                      std::to_string(floor) + " slots");
         std::fprintf(stderr, "fnx: %d of %d routed experts (%.1f GiB) in RAM, ranked by %s%s\n", n, NL * NEXP, moved / (1ull << 30), prof,
                      ram_extra ? (" (" + std::to_string(ram_extra) + " of them because VRAM was short)").c_str() : "");
+        if (dyn_s) {
+            // FNX_EXPERT_DYN_GIB=G (64 GB of RAM; the M40 port's): of the experts in VRAM the coldest G GiB (at least `keep` a
+            // pool) stay dynamic, with a host copy; the rest are permanent: placed once, no host copy, so RAM holds G plus
+            // FNX_EXPERT_RAM_GIB of experts. What the pools lend (K/V with FNX_ARENA, the prompt path with FNX_PF_LEND) comes
+            // from the dynamic slots only: the Engine says so when they are too few
+            char* end = nullptr;
+            const double dyn_gib = std::strtod(dyn_s, &end);
+            if (end == dyn_s || *end || dyn_gib < 0) throw std::runtime_error(std::string("fnx: FNX_EXPERT_DYN_GIB: GiB (0 or more), not '") + dyn_s + "'");
+            const int keep = (int) std::max<long long>(floor, env_int("FNX_EXPERT_DYN_MIN", floor));
+            perm.assign(NL, std::vector<char>(NEXP, 0));
+            std::vector<char> dyn((size_t) NL * NEXP, 0);
+            std::vector<int> per(left.size(), 0);
+            double dyn_bytes = 0;
+            int nd = 0;
+            auto take = [&](int i) {
+                dyn[(size_t) i] = 1;
+                ++per[(size_t) size_of[(size_t) (i / NEXP)]];
+                dyn_bytes += bytes[(size_t) (i / NEXP)];
+                ++nd;
+            };
+            for (int i : order)   // each pool's coldest `keep` first
+                if (resident[(size_t) (i / NEXP)][(size_t) (i % NEXP)] && per[(size_t) size_of[(size_t) (i / NEXP)]] < keep) take(i);
+            for (int i : order)
+                if (dyn_bytes < dyn_gib * (double) (1ull << 30) && resident[(size_t) (i / NEXP)][(size_t) (i % NEXP)] && !dyn[(size_t) i]) take(i);
+            int np = 0;
+            double pb = 0;
+            for (int l = 0; l < NL; ++l)
+                for (int e = 0; e < NEXP; ++e)
+                    if (resident[(size_t) l][(size_t) e] && !dyn[(size_t) l * NEXP + e]) perm[(size_t) l][(size_t) e] = 1, ++np, pb += bytes[(size_t) l];
+            std::string pools;
+            for (size_t p = 0; p < left.size(); ++p)
+                pools += (p ? ", " : "") + std::to_string(per[p]) + " of " + std::to_string(left[p].second);
+            std::fprintf(stderr, "fnx: FNX_EXPERT_DYN_GIB: %d experts (%.1f GiB) permanent in VRAM with no host copy, %d (%.1f GiB) dynamic "
+                                 "(by pool: %s); RAM holds %.1f GiB of experts\n",
+                         np, pb / (1ull << 30), nd, dyn_bytes / (1ull << 30), pools.c_str(), (dyn_bytes + moved) / (1ull << 30));
+        }
     }
 }
 
 // What only the load needed, once the model, the draft layer and the engine stand: the converted tensors (every card's slices are placed; 9 layers' down experts are
 // among them), the mappings' pages and the file's page cache. Then what the load's peak sent to swap comes back here, not a fault at a time in the rounds.
 void model_loaded(Model& m) {
+    if (g_numa_bound[0] + g_numa_bound[1] + g_numa_pref[0] + g_numa_pref[1])   // numa_patch.py
+        std::fprintf(stderr, "fnx: FNX_NUMA_EXPERTS: card 0 %.1f GiB bound + %.1f preferred to its node, card 1 %.1f + %.1f\n",
+                     g_numa_bound[0] / 1073741824.0, g_numa_pref[0] / 1073741824.0, g_numa_bound[1] / 1073741824.0, g_numa_pref[1] / 1073741824.0);
     const auto t0 = std::chrono::steady_clock::now();
     constexpr uintptr_t PG = 4096;
     size_t freed = 0;
@@ -1588,19 +1726,59 @@ void model_loaded(Model& m) {
         const_cast<Tensor&>(t).data = nullptr;   // a reader past this point stops at once, it does not read zeros
     }
     malloc_trim(0);
+    // FNX_PLE_RAM=0 (64 GB of RAM; the M40 port's): the PLE table (26.8 GiB) stays in the file, read through the page cache as Strata's
+    // own engine does: random access (no read-around of 128 KiB a fault), and its file's cached pages are kept
+    const bool ple_ram = env_int("FNX_PLE_RAM", 1) != 0;
+    const int ple_shard = m.ple_table ? m.ple_table->shard : -1;
     {   // after everything else: with the converted tensors gone the load's peak stays about 9 GiB lower, and the kernel has no reason to swap
         const auto t1 = std::chrono::steady_clock::now();
-        for (const Tensor* t : {m.tok_embd, m.ple_table}) lock_in_ram(m.g, *t);
-        std::fprintf(stderr, "fnx: %s and %s (%.1f GB) locked in RAM in %.1f s\n", m.tok_embd->name.c_str(), m.ple_table->name.c_str(),
-                     (m.tok_embd->nbytes + m.ple_table->nbytes) / 1e9, std::chrono::duration<double>(std::chrono::steady_clock::now() - t1).count());
+        lock_in_ram(m.g, *m.tok_embd);
+        if (ple_ram) lock_in_ram(m.g, *m.ple_table);
+        std::fprintf(stderr, "fnx: %s%s%s (%.1f GB) locked in RAM in %.1f s\n", m.tok_embd->name.c_str(), ple_ram ? " and " : "",
+                     ple_ram ? m.ple_table->name.c_str() : "", (m.tok_embd->nbytes + (ple_ram ? m.ple_table->nbytes : 0)) / 1e9,
+                     std::chrono::duration<double>(std::chrono::steady_clock::now() - t1).count());
     }
     for (int s = 0; s < m.g.shards(); ++s) {
+        if (!ple_ram && s == ple_shard) {
+            // the table's own pages stay mapped and cached; only what the load touched around it is dropped
+            const uintptr_t base = (uintptr_t) m.g.shard_base(s), end = base + m.g.shard_size(s),
+                            a0 = (uintptr_t) m.ple_table->data / PG * PG, e0 = ((uintptr_t) m.ple_table->data + m.ple_table->nbytes + PG - 1) / PG * PG;
+            if (a0 > base) madvise((void*) base, a0 - base, MADV_DONTNEED);
+            if (end > e0) madvise((void*) e0, end - e0, MADV_DONTNEED);
+            madvise((void*) a0, e0 - a0, MADV_RANDOM);
+            continue;
+        }
         madvise((void*) m.g.shard_base(s), m.g.shard_size(s), MADV_DONTNEED);
         const int fd = ::open(m.g.shard_path(s).c_str(), O_RDONLY);
         if (fd >= 0) {
             posix_fadvise(fd, 0, 0, POSIX_FADV_DONTNEED);
             ::close(fd);
         }
+    }
+    if (!ple_ram)
+        std::fprintf(stderr, "fnx: FNX_PLE_RAM=0: %s (%.1f GB) read from its file through the page cache\n", m.ple_table->name.c_str(),
+                     m.ple_table->nbytes / 1e9);
+    // FNX_PLE_WARM=1 (warm_patch.py): the table read once by a thread at idle I/O priority, so the page cache holds what it can of it
+    // before the first requests ask for its rows (they would each wait for the disk)
+    if (!ple_ram && env_int("FNX_PLE_WARM", 0) != 0) {
+        const std::string path = m.g.shard_path(ple_shard);
+        const uint64_t off = (uint64_t) ((uintptr_t) m.ple_table->data - (uintptr_t) m.g.shard_base(ple_shard)), len = m.ple_table->nbytes;
+        std::thread([path, off, len] {
+            syscall(SYS_ioprio_set, 1 /* IOPRIO_WHO_PROCESS: this thread */, 0, 3 << 13 /* IOPRIO_CLASS_IDLE */);
+            const int fd = ::open(path.c_str(), O_RDONLY);
+            if (fd < 0) return;
+            std::vector<char> buf((size_t) 16 << 20);
+            const auto t0 = std::chrono::steady_clock::now();
+            uint64_t done = 0;
+            while (done < len) {
+                const ssize_t r = ::pread(fd, buf.data(), (size_t) std::min<uint64_t>(buf.size(), len - done), (off_t) (off + done));
+                if (r <= 0) break;
+                done += (uint64_t) r;
+            }
+            ::close(fd);
+            std::fprintf(stderr, "fnx: FNX_PLE_WARM: %.1f GB of %s read in %.0f s\n", done / 1e9, path.c_str(),
+                         std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count());
+        }).detach();
     }
     auto swap_mib = [] {
         std::ifstream f("/proc/self/status");
@@ -1611,7 +1789,7 @@ void model_loaded(Model& m) {
     };
     const long long sw0 = swap_mib();
     std::vector<std::thread> th;
-    for (const Tensor* t : {m.tok_embd, m.ple_table}) {
+    for (const Tensor* t : {m.tok_embd, ple_ram ? m.ple_table : nullptr}) {
         if (!t || !t->data) continue;
         for (int i = 0; i < 4; ++i)
             th.emplace_back([t, i] {
@@ -1660,6 +1838,9 @@ void vram_step(const char* what) {
 
 void Model::place_experts() {
     choose_residency();
+    if (!perm.empty())
+        throw std::runtime_error("fnx: FNX_EXPERT_DYN_GIB: the permanent experts have no host copy, so they cannot be placed again "
+                                 "(more in RAM: FNX_EXPERT_RAM_GIB higher)");
     each_card(cards, [&](CardW& c) {
         if (c.ec_host_gu.size() != (size_t) NL * NEXP) throw std::runtime_error("fnx: placing experts needs their host copies");
         const size_t before = c.bytes;
@@ -1727,7 +1908,8 @@ void card_fields(CardW& c, F f) {
         f(c.ple_norm_query), f(c.ple_norm_conv), f(c.ple_conv), f(c.bytes), f(c.host_bytes);
 }
 #if !FNX_27B   // the 27B has no holder (plain loads only)
-static_assert(sizeof(CardW) == 920, "CardW changed: put what load_card stores in card_fields, then update this size");
+// 1008: the permanent experts (perm_*, ExpertCache n_dyn; FNX_EXPERT_DYN_GIB) are not in card_fields: the holder never has them
+static_assert(sizeof(CardW) == 1008, "CardW changed: put what load_card stores in card_fields, then update this size");
 #endif
 // every address load_card stores, in a card and in a layer: a worker moves them to where it mapped the holder's memory
 template <typename F>

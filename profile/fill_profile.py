@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
-"""Writes a run config for Strata's server (serve/server.py --config) from flash-next-iq3s-512k.template.json.
+"""Writes a run config for Strata's server (serve/server.py --config) from one of the two templates in this folder.
 
     python3 profile/fill_profile.py --models /data/flash-next --mtp /data/flash-next/mtp/rt \
         --tokenizer /data/flash-next/tokenizer --vision-exe /opt/strata-v0.2.9/build-vision/bin/strata-vision \
         --logs /var/tmp --out my-profile.json
 
---models     the folder with both IQ3_S shards and mmproj-Qwen3.8-Flash-Next-BF16.gguf
+--models     the folder with the model's files (both IQ3_S shards, or the four UD-Q4_K_XL parts) and
+             mmproj-Qwen3.8-Flash-Next-BF16.gguf
+--model      iq3_s (default): ISTA-DASLab's IQ3_S, flash-next-iq3s-512k.template.json; q4_k_xl: Unsloth's UD-Q4_K_XL,
+             flash-next-q4_k_xl-256k.template.json (README, "Unsloth's UD-Q4_K_XL")
 --mtp        the MTP draft layer's runtime folder (dense.bin, dense.txt, experts.bin; README, "The MTP draft layer")
 --tokenizer  the tokenizer folder (vocab.json, merges.txt, chat_template.jinja ...; README, "The tokenizer folder")
 --vision-exe Strata's strata-vision; leave it out to run without pictures (the "vision" block and --vision go)
@@ -13,6 +16,8 @@
 --draft-vocab another draft vocabulary than engine/data/draft_vocab_sl.bin, e.g. engine/data/draft_vocab_en.bin
 --exe        the engine, if build.sh was run with another build directory (default build/split/strata-split-2)
 --gpu        the two P100 as nvidia-smi numbers them (default "0,1")
+--ram        96 (default): the template as it is; 64: the 64 GB mode (README, "64 GB of RAM"; IQ3_S only): FNX_PLE_RAM=0,
+             FNX_EXPERT_DYN_GIB=13, --max-context 262144 without YaRN, --conversation-cache-mib 2000
 
 Every path the config names is checked; a missing one is reported and nothing is written. Anything else (the context
 length, other switches) is edited in the written JSON; docs/SWITCHES.md lists the switches.
@@ -24,11 +29,19 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 RELEASE = HERE.parent
+# per model: its template and its files (the first is --native; the engine finds the others beside it)
+MODELS = {
+    "iq3_s": ("flash-next-iq3s-512k.template.json",
+              [f"Qwen3.8-Flash-Next-GSQ-RCO-IQ3_S-0000{i}-of-00002.gguf" for i in (1, 2)]),
+    "q4_k_xl": ("flash-next-q4_k_xl-256k.template.json",
+                [f"Qwen3.8-Flash-Next-UD-Q4_K_XL-0000{i}-of-00004.gguf" for i in (1, 2, 3, 4)]),
+}
 
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("--models", required=True)
+    ap.add_argument("--model", choices=sorted(MODELS), default="iq3_s")
     ap.add_argument("--mtp", required=True)
     ap.add_argument("--tokenizer", required=True)
     ap.add_argument("--vision-exe")
@@ -37,15 +50,19 @@ def main():
     ap.add_argument("--draft-vocab", help="another draft vocabulary (default engine/data/draft_vocab_sl.bin)")
     ap.add_argument("--exe", default=str(RELEASE / "build" / "split" / "strata-split-2"))
     ap.add_argument("--gpu", default="0,1")
-    ap.add_argument("--template", default=str(HERE / "flash-next-iq3s-512k.template.json"))
+    ap.add_argument("--ram", choices=["96", "64"], default="96", help="64: the 64 GB mode (README, \"64 GB of RAM\")")
+    ap.add_argument("--template", help="another template than the model's")
     ap.add_argument("--out", required=True)
     a = ap.parse_args()
 
     if float(a.route_prior) < 0:
         sys.exit("--route-prior: 0 or more")
+    if a.ram == "64" and a.model != "iq3_s":
+        sys.exit("--ram 64: only with --model iq3_s (UD-Q4_K_XL's experts alone are 72 GiB)")
     cards = a.gpu.split(",")
     if len(cards) != 2 or not all(c.strip().isdigit() for c in cards) or cards[0].strip() == cards[1].strip():
         sys.exit("--gpu: two different card numbers, e.g. 0,1")
+    template, files = MODELS[a.model]
     values = {"{{RELEASE}}": str(RELEASE), "{{EXE}}": str(Path(a.exe).resolve()),
               "{{MODELS}}": str(Path(a.models).resolve()), "{{MTP}}": str(Path(a.mtp).resolve()),
               "{{TOKENIZER}}": str(Path(a.tokenizer).resolve()), "{{LOGS}}": str(Path(a.logs).resolve()),
@@ -62,18 +79,28 @@ def main():
             return {k: fill(v) for k, v in x.items()}
         return x
 
-    cfg = fill(json.loads(Path(a.template).read_text(encoding="utf-8")))
+    cfg = fill(json.loads(Path(a.template or HERE / template).read_text(encoding="utf-8")))
     cfg["gpu"] = ",".join(c.strip() for c in cards)
     if a.draft_vocab:
         cfg["args"][cfg["args"].index("--draft-vocab") + 1] = str(Path(a.draft_vocab).resolve())
     if not a.vision_exe:
         cfg.pop("vision")
         cfg["args"].remove("--vision")
+    if a.ram == "64":
+        # the lookup table read through the page cache, only the coldest 13 GiB of the experts in VRAM with a RAM copy; at 524,288
+        # positions the K/V pool would need nearly every expert slot, so the trained 262,144 (no YaRN) and a smaller conversation cache
+        cfg["env"]["FNX_PLE_RAM"] = "0"
+        cfg["env"]["FNX_EXPERT_DYN_GIB"] = "13"
+        cfg["args"][cfg["args"].index("--max-context") + 1] = "262144"
+        cfg["args"][cfg["args"].index("--conversation-cache-mib") + 1] = "2000"
+        for k in ("FNX_ROPE_SCALE", "FNX_YARN_ORIG_CTX"):
+            cfg["env"].pop(k)
 
-    need = [cfg["args"][cfg["args"].index("--native") + 1], cfg["args"][cfg["args"].index("--draft-vocab") + 1],
+    native = Path(cfg["args"][cfg["args"].index("--native") + 1])
+    need = [str(native.with_name(f)) for f in files] + [
+            cfg["args"][cfg["args"].index("--draft-vocab") + 1],
             cfg["env"]["FNX_EXPERT_PROFILE"], cfg["tokenizer"] + "/vocab.json", cfg["tokenizer"] + "/chat_template.jinja",
             cfg["args"][cfg["args"].index("--mtp") + 1] + "/dense.bin", cfg["args"][cfg["args"].index("--mtp") + 1] + "/experts.bin",
-            str(Path(cfg["args"][cfg["args"].index("--native") + 1]).with_name("Qwen3.8-Flash-Next-GSQ-RCO-IQ3_S-00002-of-00002.gguf")),
             cfg["exe"]]
     if "vision" in cfg:
         need += [cfg["vision"]["exe"], cfg["vision"]["mmproj"]]
@@ -81,7 +108,8 @@ def main():
     if missing:
         sys.exit("missing, nothing written:\n  " + "\n  ".join(missing))
     Path(a.out).write_text(json.dumps(cfg, indent=1) + "\n", encoding="utf-8")
-    print(f"wrote {a.out} (FNX_ROUTE_PRIOR={a.route_prior}, pictures {'on' if 'vision' in cfg else 'off'})")
+    print(f"wrote {a.out} ({a.model}, FNX_ROUTE_PRIOR={a.route_prior}, pictures {'on' if 'vision' in cfg else 'off'}, "
+          f"{a.ram} GB of RAM)")
 
 
 if __name__ == "__main__":

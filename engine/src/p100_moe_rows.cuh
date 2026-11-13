@@ -13,7 +13,7 @@ template <int TY> inline constexpr int kGrW = (kGrBytes<TY> + 3) / 4;
 #ifndef FNX_ROW_G
 #define FNX_ROW_G 2
 #endif
-template <int TY> inline constexpr int kRowG = TY == 20 || TY == 2 ? 1 : FNX_ROW_G;       // lanes per row: a gate|up row is long, a down row short
+template <int TY> inline constexpr int kRowG = TY == 20 || TY == 2 || TY == 7 || TY == 8 ? 1 : FNX_ROW_G;       // lanes per row: a gate|up row is long, a down row short
 inline constexpr int kRowT = 256;
 
 template <int P, int NW>
@@ -31,7 +31,33 @@ __device__ __forceinline__ uint32_t g8(const uint32_t (&W)[NW]) {
 // run IB of the group: the words of run_load_s, from the normalized group
 template <int TY, int IB>
 __device__ __forceinline__ void run_words(const uint32_t (&W)[kGrW<TY>], uint32_t (&w)[RunWords<TY>::n]) {
-    if constexpr (TY == 18) {   // IQ3_XXS: d, qs[96] (codes, then the signs and scale word of each run)
+    if constexpr (TY == 12 || TY == 13) {   // q4x_patch.py, Q4_K / Q5_K: d, dmin, scales[12], (Q5_K: qh[32]), qs[128]; run IB = sub-block IB
+        constexpr int C = IB >> 1, SH = 4 * (IB & 1), QS = TY == 12 ? 16 : 48;
+#define P100_KQW(k) \
+        w[k] = ((g16<QS + 32 * C + 4 * k>(W) | (g16<QS + 32 * C + 4 * k + 2>(W) << 16)) >> SH) & 0x0F0F0F0Fu; \
+        if constexpr (TY == 13) w[k] |= (((g16<16 + 4 * k>(W) | (g16<18 + 4 * k>(W) << 16)) >> IB) & 0x01010101u) << 4;
+        P100_KQW(0) P100_KQW(1) P100_KQW(2) P100_KQW(3) P100_KQW(4) P100_KQW(5) P100_KQW(6) P100_KQW(7)
+#undef P100_KQW
+        w[8] = g16<0>(W) | (g16<2>(W) << 16);
+        if constexpr (IB < 4) w[9] = (g8<4 + IB>(W) & 63u) | ((g8<8 + IB>(W) & 63u) << 8);
+        else w[9] = ((g8<8 + IB>(W) & 15u) | ((g8<IB>(W) >> 6) << 4)) | (((g8<8 + IB>(W) >> 4) | ((g8<4 + IB>(W) >> 6) << 4)) << 8);
+    } else if constexpr (TY == 7) {   // Q5_1: blocks of d, m, qh, qs[16]
+        constexpr int B = 24 * IB;
+        const uint32_t qh = g16<B + 4>(W) | (g16<B + 6>(W) << 16);
+#define P100_K51(k) { \
+            const uint32_t q = g16<B + 8 + 4 * k>(W) | (g16<B + 10 + 4 * k>(W) << 16); \
+            w[k] = (q & 0x0F0F0F0Fu) | kq_spread4((qh >> (4 * k)) & 15u); \
+            w[k + 4] = ((q >> 4) & 0x0F0F0F0Fu) | kq_spread4((qh >> (16 + 4 * k)) & 15u); }
+        P100_K51(0) P100_K51(1) P100_K51(2) P100_K51(3)
+#undef P100_K51
+        w[8] = g16<B>(W) | (g16<B + 2>(W) << 16);
+    } else if constexpr (TY == 8) {   // Q8_0: blocks of d, qs[32]
+        constexpr int B = 34 * IB;
+#define P100_K80(k) w[k] = g16<B + 2 + 4 * k>(W) | (g16<B + 4 + 4 * k>(W) << 16);
+        P100_K80(0) P100_K80(1) P100_K80(2) P100_K80(3) P100_K80(4) P100_K80(5) P100_K80(6) P100_K80(7)
+#undef P100_K80
+        w[8] = g16<B>(W);
+    } else if constexpr (TY == 18) {   // IQ3_XXS: d, qs[96] (codes, then the signs and scale word of each run)
         w[0] = g16<2 + 8 * IB>(W); w[1] = g16<4 + 8 * IB>(W); w[2] = g16<6 + 8 * IB>(W); w[3] = g16<8 + 8 * IB>(W);
         w[4] = g16<66 + 4 * IB>(W) | (g16<68 + 4 * IB>(W) << 16);
         w[5] = g16<0>(W);
@@ -413,6 +439,10 @@ void p100_moe_rows_phase_w(const DW& A, size_t sa, const Job* jobs, const int* n
         case T_Q4_0: rows_launch<2>(a, T, njobs_cap, s); break;
         case T_IQ2_XXS: rows_launch<16>(a, T, njobs_cap, s); break;
         case T_IQ1_M: rows_launch<29>(a, T, njobs_cap, s); break;
+        case T_Q4_K: rows_launch<12>(a, T, njobs_cap, s); break;   // q4x_patch.py
+        case T_Q5_K: rows_launch<13>(a, T, njobs_cap, s); break;
+        case T_Q5_1: rows_launch<7>(a, T, njobs_cap, s); break;
+        case T_Q8_0: rows_launch<8>(a, T, njobs_cap, s); break;
         default: throw std::runtime_error("p100 moe rows: expert type " + std::to_string(A.type) + " not handled");
     }
     const cudaError_t e = cudaGetLastError();

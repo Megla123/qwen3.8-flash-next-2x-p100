@@ -33,8 +33,11 @@ EXE=$("$PY" -c 'import json, sys; print(json.load(open(sys.argv[1]))["exe"])' "$
 missing=$(ldd "$EXE" | grep "not found" || true)
 [ -z "$missing" ] || die "the engine cannot find: $missing; set LD_LIBRARY_PATH to the CUDA 12 libraries it was built with"
 avail=$(awk '/^MemAvailable:/ {print int($2 / 1048576)}' /proc/meminfo 2>/dev/null || true)
-if [ -n "$avail" ] && [ "$avail" -lt 80 ]; then
-  say "WARNING: $avail GiB of RAM available; the engine holds about 85 GiB once loaded"
+kind=$("$PY" -c 'import json, sys; c = json.load(open(sys.argv[1])); print("q4" if "q4_k_xl" in c.get("model_name", "") else c["env"].get("FNX_PLE_RAM", "1"))' "$CFG")
+# what the engine holds once loaded: UD-Q4_K_XL, the 64 GB mode (fill_profile.py --ram 64) or the default
+case $kind in q4) holds=70 ;; 0) holds=46 ;; *) holds=85 ;; esac
+if [ -n "$avail" ] && [ "$avail" -lt $((holds - 5)) ]; then
+  say "WARNING: $avail GiB of RAM available; the engine holds about $holds GiB once loaded"
 fi
 if command -v nvidia-smi >/dev/null; then
   cards=$("$PY" -c 'import json, sys; print(json.load(open(sys.argv[1]))["gpu"])' "$CFG")

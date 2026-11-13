@@ -1,18 +1,26 @@
 # Qwen3.8-Flash-Next on two Tesla P100
 
 This is a port of Strata's all-cards split engine (`strata-split-2`) to the NVIDIA Tesla P100 (Pascal, sm_60). It runs
-**Qwen3.8-Flash-Next** in ISTA-DASLab's **GSQ-RCO IQ3_S** GGUF on **two P100 16 GB** cards with a 524,288-token
-context, MTP drafting and pictures. On our server it writes **about 67 tokens a second** and reads a long prompt at
-**about 920 tokens a second**.
+**Qwen3.8-Flash-Next** on **two P100 16 GB** cards with MTP drafting and pictures, from either of two GGUF files. On our
+server, with this repository's benchmark (see "Our numbers"):
 
-> **Currently built for one model file only: ISTA-DASLab's IQ3_S GGUF, on Tesla P100 cards.** Other quantizations, such
-> as Unsloth's UD-Q4_K_XL, do not use this port's P100 kernels and run slower than Strata itself, or not at all (see
-> "Known limitations"). On other cards, or with other files, use [Strata](https://github.com/Niko1221/Strata).
+| Model file and profile | Context | RAM | Fresh writing | Edits (py / md) | Reading 38,862 tokens |
+|---|---:|---|---:|---:|---:|
+| ISTA-DASLab's GSQ-RCO **IQ3_S** (`setup.sh DATA`) | 524,288 | 96 GB | 66.6 tok/s | 111.0 / 116.0 | 954 tok/s |
+| the same in the **64 GB mode** (`setup.sh DATA --ram 64`) | 262,144 | 64 GB | 63.3 | 93.6 / 101.9 | 768 |
+| Unsloth's **UD-Q4_K_XL** (`setup.sh DATA --model q4_k_xl`) | 262,144 | 96 GB | 41.4 | 45.3 / 43.9 | 726 |
+
+> **Built for these two files, on Tesla P100 cards.** Files with other expert types (Q6_K, Q3_K, Q2_K, ...) do not use
+> this port's P100 kernels and run slower than Strata itself, or not at all (see "Known limitations"). On other cards,
+> or with other files, use [Strata](https://github.com/Niko1221/Strata). IQ3_S is the faster of the two: UD-Q4_K_XL is
+> the larger quantization (72 GiB of experts against 49), so fewer of its experts fit on the cards, edits wait for
+> PCIe, and 96 GB of RAM is tight for it (see "Unsloth's UD-Q4_K_XL").
 
 The engine is one executable. [Strata](https://github.com/Niko1221/Strata)'s Python server (v0.2.9) drives it and gives
 you the OpenAI-compatible API, the tokenizer and the chat template. This repository holds the engine's sources exactly
-as they run in our production, the build, an example run config, and the benchmark we measure with. The model is not
-included: you download it yourself (see "Prepare the model files").
+as our production engine for UD-Q4_K_XL was built from them (with the IQ3_S profile they give our IQ3_S production
+engine's bits, see "Our numbers"), the build, run configs for both files, and the benchmark we measure with. The model
+is not included: you download it yourself (see "Prepare the model files").
 
 - What is ours and what is Strata's: [NOTICE.md](NOTICE.md), file by file in [docs/PROVENANCE.md](docs/PROVENANCE.md),
   every change in [docs/upstream-v0.2.10.diff](docs/upstream-v0.2.10.diff).
@@ -20,26 +28,57 @@ included: you download it yourself (see "Prepare the model files").
 
 ## Our numbers
 
-Measured through Strata's server with the tests of [bench/bench.py](bench/bench.py) on a freshly loaded engine, with the
-example profile at `FNX_ROUTE_PRIOR=0` (exact, see below). Writing is at temperature 0 unless marked. The rounds named
-(`splitNN`) are in our measurement logs, which are not part of this release (they are in Slovenian and mixed with our
-private setup); the numbers and findings in this README and in `docs/` are taken from them.
+### This release, with the benchmark
+
+[bench/bench.py](bench/bench.py) through Strata v0.2.9's server, on the engine that this repository's `build.sh` built
+on our server (`f85a4aba`), in one test window on 13 Nov 2026. Each profile was written by `profile/fill_profile.py` at
+`FNX_ROUTE_PRIOR=0` (exact, see "Exact and lossy") and run once, on a freshly loaded engine. Writing is at temperature 0
+unless marked. These are the benchmark's own inputs, so your run compares with them directly (it prints them beside
+yours).
+
+| Test | IQ3_S, 512k | IQ3_S, 64 GB mode, 256k | UD-Q4_K_XL, 256k |
+|---|---:|---:|---:|
+| Fresh writing: 12 new prompts, 300 tokens each (tok/s) | **66.6** | **63.3** | **41.4** |
+| Edit: the model repeats Strata's `tools/collect_profile_traces.py` with a variable renamed (1,197 tokens) | **111.0** | **93.6** | **45.3** |
+| Edit: the model repeats 5,000 characters of Strata's `docs/SECOND_GPU.md` with a word replaced (1,228 tokens) | **116.0** | **101.9** | **43.9** |
+| Cold read of 38,862 tokens | **954** | **768** | **726** |
+| Writing right after that read | 61.8 | 61.4 | 44.7 |
+| New messages on a running conversation: 2,029 / 3,586 / 5,259 / 7,142 / 11,081 / 14,212 / 20,243 tokens | 700 / 815 / 853 / 803 / 941 / 876 / 904 | 613 / 717 / 759 / 710 / 850 / 783 / 817 | 529 / 671 / 715 / 668 / 804 / 617 / 661 |
+| Picture (96 x 96 PNG, encoder on the CPU): time to the answer; writing after it (sampled) | off in this run | off | 48.4 s; 39.8 |
+| Load, until the server reports loaded | 312 s | 249 s | 209 s |
+
+- **The same bits as our production.** Our IQ3_S production engine (`bf9c7f1f`) with the same profile gave the same
+  first-token logits in 27 of 27 requests and the same speeds (66.9, 111.0 / 116.0, 953). The 64 GB mode gave the IQ3_S
+  profile's logits in 27 of 27 (for that comparison with the same YaRN setting as the 512k profile; speed does not depend
+  on it). Our production engine for UD-Q4_K_XL (`c213636c`) with the UD-Q4_K_XL profile gave its logits in 29 of 29
+  requests, the picture's included, and the same speeds within the noise of that run (fresh 38.8, edits 45.3 / 43.4,
+  read 722).
+- **The 64 GB mode** ran in a memory cgroup of 58 GiB on our 96 GB server (see "64 GB of RAM").
+- **UD-Q4_K_XL** ran short of RAM: 4-7 GiB available at the lowest and the 8 GB swap file full. The fresh figure is all
+  tokens over all time; one prompt of the 12 ran at 17.7 tok/s while the system swapped (the other 11: 39.6-56.1), and
+  the picture's first answer took 48.4 s (4.8 s in the run of our production engine, 2.6-2.7 s with IQ3_S). See
+  "Unsloth's UD-Q4_K_XL".
+
+### Our rounds
+
+The rounds named (`splitNN`, `q4kN`) are in our measurement logs, which are not part of this release (they are in
+Slovenian and mixed with our private setup); the numbers and findings in this README and in `docs/` are taken from them.
+They ran our own chain of tests (the benchmark's fresh prompts and Markdown edit, other texts for the reads and the
+Python edit), IQ3_S at `FNX_ROUTE_PRIOR=0`:
 
 | Test | Result | Measured in |
 |---|---|---|
-| Fresh writing: 12 new prompts, 300 tokens each | **66.7-67.1** tok/s | rounds `split69`, `split71`, `split72` |
-| Edit: the model repeats a 5,000-character Markdown text with one word replaced (1,228 tokens) | **115.9** tok/s | the same rounds |
-| Edit: the model repeats a 4.6 KB Python file with a variable renamed (1,388 tokens) | **108.8-109.1** tok/s | the same rounds (private input file; the benchmark uses a public one) |
-| Cold read of 36,424 tokens | **924** tok/s | `split73` (one round; the build before read 903-918 in four rounds) |
+| Fresh writing: 12 new prompts, 300 tokens each | **66.7-67.2** tok/s | rounds `split69`, `split71`, `split72`, `split74` |
+| Edit: the model repeats a 5,000-character Markdown text with one word replaced (1,228 tokens) | **114.7-116.2** tok/s | the same rounds |
+| Edit: the model repeats a 4.6 KB Python file with a variable renamed (1,388 tokens) | **108.5-109.1** tok/s | the same rounds (private input file; the benchmark uses a public one) |
+| Cold read of 36,424 tokens | **961** tok/s | `split74`, `split75` (with `FNX_PF_SP`; 920-924 without) |
 | Writing right after that read | 56-60 tok/s | `split69`-`split73` |
-| New messages on a running conversation: 1,719 / 3,460 / 4,582 / 7,181 / 10,795 / 13,840 / 20,787 tokens | 659 / 810 / 834 / 805 / 909 / 868 / 883 tok/s | `split73` |
+| New messages on a running conversation: 1,719 / 3,460 / 4,582 / 7,181 / 10,795 / 13,840 / 20,787 tokens | 656 / 808 / 839 / 807 / 946 / 900 / 917 tok/s | `split75` |
+| A read deep in a conversation: 58,555 tokens | 941 tok/s | `split75` |
 | Picture (96 x 96 PNG, encoder on the CPU): time to the answer | 2.6-2.7 s | `split69` |
 | Writing after the picture (sampled) | 52.4-52.6 tok/s | `split69` |
-| Load, until the server reports loaded | 305-335 s | `split69`-`split73` |
+| Load, until the server reports loaded | 305-335 s | `split69`-`split75` |
 
-- **The released binary** (`5ef3a6ae`) ran one round, `split73`: the long read, the writing right after it, and the
-  medium reads. Its last change touched the prompt path only, so the other writing rows come from the build before it
-  (`2ef67b0e`), whose writing code is the same.
 - **Deep contexts**, measured on an older build (`c16e3b6d`, 11 Nov): reading 0 → 134k tokens 835 tok/s,
   131k → 281k 800 tok/s, 279k → 505k 725 tok/s. Later builds only made reading faster.
 - **With `FNX_ROUTE_PRIOR=0.15`** (our production setting, lossy) on the build of 11 Nov (`b1438fe1`, `split67`):
@@ -62,18 +101,76 @@ private setup); the numbers and findings in this README and in `docs/` are taken
 Our server runs Strata v0.2.9 with two local changes that are not on the speed path: a `/slots` endpoint for our own app,
 and tool-call parsing fixes backported from Strata 0.2.12. Plain v0.2.9 is what you need.
 
+## 64 GB of RAM
+
+The default profile holds 82-85 GiB once loaded: a pinned RAM copy of every expert (48.8 GiB) and the 26.8 GiB lookup
+table (`per_layer_token_embd`, the second shard) copied into RAM. `setup.sh --ram 64` (or `fill_profile.py --ram 64`)
+writes a profile for a machine with 64 GB, IQ3_S only:
+
+- `FNX_PLE_RAM=0`: the lookup table is read from its file through the page cache, as Strata's own engine does; each
+  decode window or prompt chunk asks for its rows' pages at once.
+- `FNX_EXPERT_DYN_GIB=13`: of the experts in VRAM only the coldest 13 GiB keep a RAM copy and take part in the expert
+  cache; the other 6.8 GiB stay in VRAM for good, with no copy. RAM then holds 42.0 GiB of experts instead of 48.8.
+- `--max-context 262144` (the trained length, no YaRN) and a 2,000 MiB conversation cache. At 524,288 positions the
+  K/V pool needs nearly every expert slot to be one it can borrow, so there is nothing to keep in VRAM for good; the load
+  says so and stops if the two do not fit together.
+
+We have no 64 GB machine. We ran the profile on our 96 GB server inside a memory cgroup of 58 GiB without swap
+(`systemd-run --user --scope -p MemoryMax=58G -p MemorySwapMax=0`), which counts the pinned copies, the engine's own
+memory and the page cache, after dropping the lookup table's file from the page cache (as after a reboot):
+
+- **The load** peaked at the cgroup's 58 GiB without an out-of-memory kill: 55.6 GiB that cannot be dropped (42.0 GiB of
+  pinned experts and 13.6 GiB the load needs for a while), the rest page cache.
+- **Once loaded** the engine holds 45-46.5 GiB (43.4 GiB pinned, 1.5-3 GiB of its own); the page cache took about 3 GB of
+  the lookup table by the end of the benchmark.
+- **Speed** against the 512k profile on 96 GB (table under "Our numbers"): fresh writing −5 %, edits −16 % and −12 %, a
+  cold 38k read −20 %, the reads on a running conversation −10 to −12 %, writing after a long read the same. The answers
+  are the same: first-token logits identical in 27 of 27 requests. The lookup table had been dropped from the page
+  cache before the run (as after a reboot), so these are figures of a cold start.
+- On a real 64 GB machine Linux sees about 62 GiB. Leave little else running: the load's 55.6 GiB must fit beside the
+  system, and what is left is page cache for the lookup table.
+
+## Unsloth's UD-Q4_K_XL
+
+[unsloth/Qwen3.8-Flash-Next-GGUF](https://huggingface.co/unsloth/Qwen3.8-Flash-Next-GGUF), folder `UD-Q4_K_XL`, four
+parts, 111.3 GB. Its routed experts are Q4_K for gate|up (layer 2 Q5_K) and Q5_1 for down (layers 2, 4, 30, 46 and 47
+Q8_0): 71.7 GiB in all, against IQ3_S's 48.8. This release has P100 kernels for those four types, for writing (the row
+kernel) and for reading prompts (the job kernels), made like the IQ3_S ones: the values become FP16 exactly, then the
+block's scales apply. `setup.sh --model q4_k_xl` downloads it with ISTA-DASLab's picture projector and writes
+`profile/flash-next-q4_k_xl-256k.template.json`; [docs/SWITCHES.md](docs/SWITCHES.md#the-ud-q4_k_xl-profile) lists what
+differs from the IQ3_S profile and why.
+
+- **96 GB of RAM** at least, and it is tight. The profile uses the 64 GB mode's switches to fit at all: with every
+  expert pinned (73 GiB), 9 GiB of page cache were left for the 28.8 GB lookup table and a 36k read ran at 146 tok/s.
+  With 14 GiB of the VRAM experts dynamic (5.2 GiB in VRAM for good) RAM holds 66.5 GiB of experts. In the benchmark run
+  above, with pictures and the 4,000 MiB conversation cache, 4-7 GiB stayed available at the lowest and the system's
+  8 GB swap filled; one fresh prompt and the picture's first answer were slow then. A smaller conversation cache
+  (`--conversation-cache-mib`) or no pictures leave more room for the lookup table; we have not measured that.
+- **262,144 positions.** At 524,288 the load stops: the prompt path's two staging buffers need about 1.95 GiB a card
+  (IQ3_S about 1), more than the slots it borrows leave.
+- **Slower than IQ3_S**, and most of all in edits. In our rounds (`q4k1`, our own test chain, with our production's
+  `FNX_ROUTE_PRIOR=0.15`) UD-Q4_K_XL ran fresh writing at 52.6 tok/s against IQ3_S's 68.2 (77 %), edits at 53.9-57.5
+  against 117.6-122.6 (46 %), a cold 36k read at 724 against 946 (77 %). On the cards are 27 % of its experts (IQ3_S 41 %),
+  and each missing one is 1.33 times bigger. Prompt-lookup drafts in an edit make windows of up to 16 rows that touch
+  about 100 different experts a layer, mostly not on the cards: a round of an edit took 215 ms against IQ3_S's 98,
+  bound by the PCIe copies. Shorter lookup drafts (`--lookup` 5, 7, 10) and NUMA placement of the RAM copies did not help.
+- **Pictures** work with the same projector; the encoder reads the vocabulary from the first part.
+- **The same bits as our production:** see "Our numbers". The kernels compute in FP16 like the IQ3_S ones, so against
+  other engines the answers are close, not identical.
+
 ## Requirements
 
 - **Linux, x86-64.**
 - **Two Tesla P100 16 GB (PCIe).** The engine is built for exactly two cards of compute capability 6.0 and refuses
   others. It never uses peer-to-peer access or NVLink: the cards exchange their sums through pinned host memory.
 - **PCIe Gen3 x16 for each card.** Experts that are not in VRAM are copied from RAM while it runs (see "Other machines").
-- **96 GB of RAM.** The engine keeps a pinned RAM copy of every expert (about 47 GiB) and the model's 26.8 GiB lookup
-  table (the second shard) in RAM. Once loaded it holds 82-85 GiB of the 91.8 GiB Linux sees on our server; during the
-  load it needs 8.4 GiB more, freed at the end. **64 GB is not enough** for this engine, even though Strata's own engine
-  runs IQ3_S in 64 GB.
-- **Disk:** 83.6 GB for the model's two shards, 0.9 GB for the picture projector, 0.8 GB for the MTP draft layer (another
-  6 GB while you prepare it). The load reads 48 GB from disk: about 100 s of the 5 minutes on ours (0.5 GB/s).
+- **96 GB of RAM**, or **64 GB** with the 64 GB mode (IQ3_S only, see "64 GB of RAM"). The default profile keeps a
+  pinned RAM copy of every expert (about 47 GiB) and the model's 26.8 GiB lookup table (the second shard) in RAM. Once
+  loaded it holds 82-85 GiB of the 91.8 GiB Linux sees on our server; during the load it needs 8.4 GiB more, freed at
+  the end. UD-Q4_K_XL needs 96 GB too (see "Unsloth's UD-Q4_K_XL").
+- **Disk:** 83.6 GB for the IQ3_S shards (UD-Q4_K_XL: 111.3 GB), 0.9 GB for the picture projector, 0.8 GB for the MTP
+  draft layer (another 6 GB while you prepare it). The IQ3_S load reads 48 GB from disk: about 100 s of the 5 minutes
+  on ours (0.5 GB/s).
 - **CUDA 12.x** (CUDA 13 dropped sm_60) with a host compiler it accepts (CUDA 12.4: gcc 13 at most), CMake 3.22 or newer,
   git, and a driver that supports both CUDA 12 and Pascal.
 - **Python 3.10 or newer** for Strata's server and tools.
@@ -92,6 +189,9 @@ bash setup.sh /data/flash-next         # Strata v0.2.9, the model (85 GB downloa
 bash run.sh /data/flash-next           # the server on http://127.0.0.1:8080/v1, loaded after about 5 minutes
 ```
 
+- `bash setup.sh /data/flash-next --ram 64` writes the 64 GB mode's profile; `bash setup.sh /data/flash-next-q4 --model q4_k_xl`
+  downloads and sets up Unsloth's UD-Q4_K_XL instead of the IQ3_S file (112 GB). One `DATA` folder holds one profile, so
+  give each model its own folder, or `--models` the same model folder to share the downloads.
 - `bash setup.sh /data/flash-next --check` only reports what is there and what is still to do.
 - `setup.sh` skips every step whose result is already there, so after an interruption you run it again; downloads
   resume. `--models DIR` uses model files you already have (they are checked against SHA-256), `--no-pictures` leaves
@@ -129,7 +229,7 @@ cd "$P100" && bash build.sh            # nvcc from PATH; or: CUDA=/usr/local/cud
 4. refuses a binary that can call a CUDA peer-access function, and warns if `ldd` cannot find the CUDA libraries.
 
 It stops early, with a message, if the toolkit is not CUDA 12 or the host compiler is newer than that toolkit accepts
-(set `HOSTCXX=g++-13`). A full build took about 20 minutes on our two Xeon Bronze 3106 (`kernels_p2.cu` alone about 17).
+(set `HOSTCXX=g++-13`). A full build took 17.5 minutes on our two Xeon Bronze 3106 (`kernels_p2.cu` alone most of it).
 Each compile job takes 1-2 GB of RAM. Do not build on the machine while the engine is loaded: it pins most of the RAM,
 and a build beside it once hung our server.
 
@@ -160,8 +260,22 @@ revision `ed59f92082b1e93c0e96d60a8b11aab089b52f09` (the one Strata pins), into 
 | `Qwen3.8-Flash-Next-GSQ-RCO-IQ3_S-00002-of-00002.gguf` | 28,800,138,432 | `316b46f3a2dbd68c900f43136ab9449f9dcc3725dfd8c794847c204bc161e113` |
 | `mmproj-Qwen3.8-Flash-Next-BF16.gguf` (pictures only) | 907,543,008 | `b1a82259702816a5330d7bd7607cd9676b11780e79ff7348c21103ff3ce49bd0` |
 
+**Or UD-Q4_K_XL** (`setup.sh --model q4_k_xl`), from [unsloth/Qwen3.8-Flash-Next-GGUF](https://huggingface.co/unsloth/Qwen3.8-Flash-Next-GGUF),
+folder `UD-Q4_K_XL`, revision `084c631ac221016019d6e0a863afe92d90edd3b0`, with the same projector from ISTA-DASLab:
+
+| File | Bytes | SHA-256 |
+|---|---:|---|
+| `Qwen3.8-Flash-Next-UD-Q4_K_XL-00001-of-00004.gguf` | 10,946,618 | `acc44040f74d0e55fb89c3967056cce5dbda1bcc52e909c3ba6fc72b5e9c0858` |
+| `Qwen3.8-Flash-Next-UD-Q4_K_XL-00002-of-00004.gguf` | 49,720,539,552 | `45792ae869072d8229384c51c7c73dd959e191505252b41dd71852d9746f5ce4` |
+| `Qwen3.8-Flash-Next-UD-Q4_K_XL-00003-of-00004.gguf` | 32,803,030,176 | `8c76e79d444b16a663d9c8db54e585ed3b1da13eebd2619c37b0c355da803c82` |
+| `Qwen3.8-Flash-Next-UD-Q4_K_XL-00004-of-00004.gguf` | 28,800,138,432 | `5de8b5dbf89409acc39468decafd4a4a95b13c29d88a14b0356107897829ec36` |
+
+The fourth part is the same lookup table as IQ3_S's second shard: the two files differ only in two header bytes (the
+part's number and count). The tokenizer folder made from the first part is byte-identical to the one made from the IQ3_S
+file.
+
 `setup.sh` downloads them with `curl` (resumable; set `HF_TOKEN` if Hugging Face asks for one) and checks them against
-the table. By hand, for example with the Hugging Face CLI, one file at a time, then `sha256sum`:
+the tables. By hand, for example with the Hugging Face CLI, one file at a time, then `sha256sum`:
 
 ```bash
 hf download ISTA-DASLab/Qwen3.8-Flash-Next-GSQ-RCO-GGUF Qwen3.8-Flash-Next-GSQ-RCO-IQ3_S-00001-of-00002.gguf \
@@ -218,7 +332,8 @@ cd "$P100"
 python3 profile/fill_profile.py --models "$MODELS" --mtp "$PREP"/mtp-rt --tokenizer "$PREP"/tokenizer \
     --vision-exe "$STRATA"/build-vision/bin/strata-vision --logs "$DATA"/logs --out "$DATA"/profile.json
 # without --vision-exe: no pictures; --route-prior 0.15: our production setting (lossy); --gpu 2,3 if the P100 are
-# not cards 0 and 1; --exe if you built elsewhere than build/; --draft-vocab for another draft vocabulary
+# not cards 0 and 1; --exe if you built elsewhere than build/; --draft-vocab for another draft vocabulary;
+# --ram 64: the 64 GB mode; --model q4_k_xl: UD-Q4_K_XL (profile/flash-next-q4_k_xl-256k.template.json)
 ```
 
 `run.sh` then starts Strata's server with it from the v0.2.9 checkout, which by hand is:
@@ -245,9 +360,10 @@ after about 5 minutes; then the API is at `http://127.0.0.1:8080/v1`.
 | `--batch` | 1 | one request at a time |
 | `--vision` | | pictures through the encoder |
 
-The `env` block holds 37 `FNX_*` switches. The ones that matter most for speed: `FNX_EXPERT_RAM_GIB=29.0` (how much of
+The `env` block holds 38 `FNX_*` switches. The ones that matter most for speed: `FNX_EXPERT_RAM_GIB=29.0` (how much of
 the experts stays in RAM only), `FNX_P100_DMA=1` with `FNX_DMA_SPLIT=2` and `FNX_PREFETCH=1` (copying missing experts),
-`FNX_PF_JOBV=7`, `FNX_PF_STAGE_ALL=1` and `FNX_PF_F16ACC=1` (reading), `FNX_P100_ATTN_DEC=1` (attention while writing).
+`FNX_PF_JOBV=7`, `FNX_PF_STAGE_ALL=1`, `FNX_PF_SP=1` and `FNX_PF_F16ACC=1` (reading), `FNX_P100_ATTN_DEC=1` (attention
+while writing). The UD-Q4_K_XL profile differs in eight of them ([docs/SWITCHES.md](docs/SWITCHES.md#the-ud-q4_k_xl-profile)).
 To stay within the trained 262,144 positions, edit the written JSON: `--max-context 262144`, and remove `FNX_ROPE_SCALE`
 and `FNX_YARN_ORIG_CTX`.
 
@@ -261,20 +377,16 @@ python3 bench/bench.py --strata-dir "$STRATA" --url http://127.0.0.1:8080 --wait
 python3 bench/bench.py --strata-dir "$STRATA" --tests fresh,edit,long,medium,image --out results.json   # with a picture
 ```
 
-It runs our tests (fresh writing, two edits, a long read, medium reads, optionally a picture), under 10 minutes on our
-machine, and prints your numbers beside ours. Some prompts are in Slovenian, as in our runs. The texts are read from the
-Strata v0.2.9 checkout, so every run reads the same ones. Before you compare:
+It runs our tests (fresh writing, two edits, a long read, medium reads, optionally a picture), 10-12 minutes on our
+machine, and prints your numbers beside our run of the same benchmark on this release ("Our numbers"): IQ3_S's or
+UD-Q4_K_XL's by the model the server reports, the 64 GB mode's with `--ours iq3_s_64gb`. Some prompts are in Slovenian,
+as in our runs. The texts are read from the Strata v0.2.9 checkout, so every run reads the same ones. Before you compare:
 
 - **Start the engine fresh and run the benchmark once.** The expert cache learns what it reads, so a second run on the same
   engine is faster.
-- Comparable as they are: fresh writing (the same 12 prompts), the Markdown edit (the same text: v0.2.9's
-  `docs/SECOND_GPU.md` is the file we used) and the picture.
-- Not the same text as ours: the long and medium reads (we read an older Strata checkout with a local change; the
-  benchmark reads v0.2.9's `docs/*.md` and `src/**/*.cpp`, the same sizes in characters) and the Python edit (ours was a
-  private 4.6 KB script; the benchmark uses Strata's `tools/collect_profile_traces.py`, 4.1 KB). Expect the same ballpark,
-  not the same numbers.
-- Our runs differed by up to 2 % between rounds on the same build (long read 903-918), more right after a change of
-  settings.
+- Ours are one run each. Our rounds differed by up to 2 % between runs of the same build (long read 903-918), more right
+  after a change of settings. Our IQ3_S picture numbers are from our rounds (pictures were off in the release run), and
+  UD-Q4_K_XL's from the run of our production engine for it (the release run was short of RAM then).
 - Keep `FNX_PROF=0` and nothing else on the cards. Our cards ran at 1,328 MHz under load; the clock follows recent load,
   so short tests can differ by 4-5 %.
 
@@ -293,7 +405,8 @@ means that: the same bits as our previous build.
   other arithmetic (`FNX_PF_F16ACC`, the HFMA2 expert kernels). Against our earlier engine on the same cards (Strata
   0.2.9's layer-split engine with our P100 kernels) the first token matched in 21 of 21 requests. The YaRN setting
   changes the position encoding at every length (see "Run" to turn it off).
-- The model is IQ3_S: ISTA-DASLab's quantization, not the full model (Strata's `docs/QUANTS.md` has its numbers).
+- The models are quantizations, not the full model: ISTA-DASLab's IQ3_S (Strata's `docs/QUANTS.md` has its numbers) and
+  Unsloth's UD-Q4_K_XL. We have not compared their answers' quality.
 
 ## Other machines
 
@@ -307,8 +420,8 @@ none of them was measured on another machine.
   live only in RAM, so traffic over PCIe is part of the work: missing experts are copied in for each decode window, and a
   long read stages every missing expert of each layer (up to 568 MiB a layer) for each chunk. Expect reading to slow
   down clearly and writing to slow down less (fewer copies per token). Gen2 x16 is like Gen3 x8.
-- **More RAM** does not make it faster; the cards' PCIe links are the limit. **Less** than 96 GB does not load this
-  profile.
+- **More RAM** does not make it faster; the cards' PCIe links are the limit. With **64 GB** use the 64 GB mode (see
+  "64 GB of RAM"); less than that does not load.
 - **Power limit:** at 250 W instead of our 185 W, long reads were at most 1-1.5 % faster on our cards.
 - **P100 SXM2:** the same chip and should run; NVLink is not used. Not tried.
 - **Volta and newer cards** (sm_70 and up): the P100 kernels are used only below sm_70, so a build for those cards is
@@ -319,14 +432,14 @@ none of them was measured on another machine.
 
 ## Known limitations
 
-- **Only the IQ3_S file.** The port's P100 expert kernels cover the expert types IQ3_S, IQ3_XXS, IQ2_S, IQ4_XS, IQ4_NL,
-  Q4_0, IQ2_XXS and IQ1_M. Files whose experts are K-quants, such as Unsloth's UD-Q4_K_XL (Q4_K, Q5_K, Q6_K, Q8_0), get
-  none of them: writing falls back to Strata's original kernels, and reading a prompt stops with
-  `p100 moe: expert type N not handled` (with `FNX_PF_MOE_Q8=1` it reads through the writing kernels, slowly). A tester
-  ran UD-Q4_K_XL on this port beside current Strata on the same machine, and the port was slower on every test; on IQ3_S
-  the tester got the same results as ours. These files also hold more expert bytes (UD-Q4_K_XL about 72 GiB against 47), so
-  less of them fits on the cards. Of ISTA's other files, IQ2_XS ran on an earlier build of this port (7-8 Nov, about
-  65 tok/s fresh) but not on this one; Q2_0 and IQ3_XXS have not been run.
+- **Only these two files.** The port's P100 expert kernels cover the expert types IQ3_S, IQ3_XXS, IQ2_S, IQ4_XS, IQ4_NL,
+  Q4_0, IQ2_XXS and IQ1_M, and since this release Q4_K, Q5_K, Q5_1 and Q8_0 (UD-Q4_K_XL's). Files with other expert
+  types (Q6_K, Q3_K, Q2_K, ...) get none of them: writing falls back to Strata's original kernels, and reading a prompt
+  stops with `p100 moe: expert type N not handled` (with `FNX_PF_MOE_Q8=1` it reads through the writing kernels,
+  slowly). On the first release, which had no Q4_K kernels, a tester ran UD-Q4_K_XL beside current Strata on the same
+  machine and the port was slower on every test; on IQ3_S the tester got the same results as ours. Of ISTA's other
+  files, IQ2_XS ran on an earlier build of this port (7-8 Nov, about 65 tok/s fresh) but not on this one; Q2_0 and
+  IQ3_XXS have not been run. Unsloth's other files have not been run.
 - Two P100 16 GB and Linux only.
 - One request at a time is what we tuned for (`--batch 1`).
 - The engine refuses `logprobs`.
@@ -338,10 +451,10 @@ none of them was measured on another machine.
   they run.
 - `history/patches/` holds the last patch scripts we applied, with our build machine's paths. They are a record: their
   changes are already in `engine/`.
-- This folder's `build.sh` and top-level `CMakeLists.txt` reproduce our build's settings and were checked against it by
-  reading (same sources, same flags), but this exact folder has not been compiled yet. `setup.sh` and `run.sh` were run
-  against stand-ins (a fake Strata checkout and tools, small model files), not yet against the real downloads; the
-  header generator, the profile writer and the benchmark (against a stand-in server) were run as they are.
+- This folder's `build.sh` built the engine on our server (17.5 minutes with `JOBS=12`, llama.cpp from our Strata v0.2.9
+  build tree at the pinned commit), and that engine gave our production engines' bits ("Our numbers"); the profile
+  writer and the benchmark ran there as they are. `setup.sh` and `run.sh` were run against stand-ins (a fake Strata
+  checkout and tools, small model files), not yet against the real downloads.
 
 ## Credits and license
 

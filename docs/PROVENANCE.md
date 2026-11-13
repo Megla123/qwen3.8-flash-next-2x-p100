@@ -2,7 +2,9 @@
 
 Compared with Strata v0.2.10 (`github.com/Niko1221/Strata`, commit `ffa80d73133ea5c548aefe57889a16e8085a938f`), directory `src/split/`.
 Strata's `src/split/` is itself a port of sFNX by John Fink (`third_party/sfnx/NOTICE.md`). The full diff is `upstream-v0.2.10.diff`.
-SHA-256 values are those of the production engine's sources (`strata-split-2`, binary SHA-256 `5ef3a6aeca5b331c…`).
+SHA-256 values are those of the sources of our production engine for UD-Q4_K_XL (`strata-split-2`, binary SHA-256
+`c213636ce3de2182…`, 13 Nov 2026); with its switches at their defaults it is our IQ3_S production engine (`bf9c7f1f…`) bit for bit
+(see README, "Our numbers").
 
 | File | Origin | SHA-256 |
 |---|---|---|
@@ -18,7 +20,7 @@ SHA-256 values are those of the production engine's sources (`strata-split-2`, b
 | `src/card_check.hpp` | Strata v0.2.10, unchanged | `704aeda84671d56f6021321ee04562562ffa2358661b73312399184396558320` |
 | `src/card_split.hpp` | Strata v0.2.10, unchanged | `0e211d82a6b0560078e9b5a6e2e681394b412f5344c08b92f877dc9fc0b0e2cf` |
 | `src/dense.cuh` | Strata v0.2.10, modified by us | `1ca66d9ac98ea99c5f7dc388142cb04396440b2a8be38b2dd10e34ee4e2b62ba` |
-| `src/engine.cu` | Strata v0.2.10, modified by us | `f86042d7da8ca32b9bd583e10eab818bf12df56fc52a5f12d1e5561db75c4888` |
+| `src/engine.cu` | Strata v0.2.10, modified by us | `b4b927dfc8e52f5045de9fa24b7007a84b85ecce12f8f245320c6bd6f8575c7c` |
 | `src/engine.hpp` | Strata v0.2.10, modified by us | `7c42647a14be2e63f20f7c6a56ab051d1dacf2a7e7da7cf8cab8f2f9fd4fe5c4` |
 | `src/engine_common.cu` | Strata v0.2.10, modified by us | `7787e092a92f2330fd08ccca8b6302f6ad65e2472c93de9aa5dead9f625b8bd9` |
 | `src/engine_impl.hpp` | Strata v0.2.10, modified by us | `f706d57b1302d9592c9eab23e7d4bf5cb0e8f2f12ec6bb3dc3dc65822fd51018` |
@@ -40,8 +42,8 @@ SHA-256 values are those of the production engine's sources (`strata-split-2`, b
 | `src/iq3s_x.cuh` | ours (new) | `b3e208682ef2a76e78c9b6154e792dc1f39129f8fd7de381bac8a6fd6568146a` |
 | `src/kernels.cu` | Strata v0.2.10, modified by us | `b83dd9425fbaf2835ddb55f46958826e9f45fa654033c2602c8a8354de174041` |
 | `src/kernels.hpp` | Strata v0.2.10, modified by us | `e9a8810cc67ca23a453e4dfd52b372102394f0503cfcf8824805257d4b701a69` |
-| `src/model.cpp` | Strata v0.2.10, modified by us | `c276d0c221773cdf8d3775b11cd779a738d0be15093af5f74fd8ba190a33946d` |
-| `src/model.hpp` | Strata v0.2.10, modified by us | `14cfdf30945d9982422d78de00f0450e1bc4abb758ce2722a998233439c4def3` |
+| `src/model.cpp` | Strata v0.2.10, modified by us | `dadbb90409c500209cad364959599f9d6c8cb14b6c91923c77a976910a570d7c` |
+| `src/model.hpp` | Strata v0.2.10, modified by us | `1e3dce28b15442381b5c917cee8fdc3d16431b8f4be535836e8057dd6fde4cfa` |
 | `src/moe.cuh` | Strata v0.2.10, modified by us | `276a289cf4234e8deed2d689b45b7d5f1342c90a1385b63964312eb53aabf60f` |
 | `src/moe_mma.cu` | Strata v0.2.10, modified by us | `c66a70054fee82feca74ecf594eff5095dc207d84cee478e373f83bc92079b92` |
 | `src/moe_mma.cuh` | Strata v0.2.10, unchanged | `67d3739844a7615dac39c3f6e4f034ef8818ee4898764df813a53b69003ab9a3` |
@@ -52,14 +54,14 @@ SHA-256 values are those of the production engine's sources (`strata-split-2`, b
 | `src/p100_attn.cuh` | ours (new) | `4c12f01dde718b5522d474a341c395e0e0afb4963994da096aad48a193e4a3cc` |
 | `src/p100_dma.cuh` | ours (new) | `3fb9504019588f25eb09be21f87c9962b44d898489d468fd0916c0c592725b8a` |
 | `src/p100_dma_box.cuh` | ours (new) | `3eb3e1c8de418cbd27705577f761f783334ac72b411c27ebb4e25c39e6ff16f6` |
-| `src/p100_iq_gemm.cuh` | ours (new) | `01652dbae694444dd54e56297f1bf36542a17dd8e8383ff4f3e14f2187deaae4` |
-| `src/p100_moe.cu` | ours (new) | `de1c814fbf37add406a43db6c53e8c377079a0e50d1cc42408bcd24fddec0571` |
-| `src/p100_moe_rows.cuh` | ours (new) | `84832fbf28e7b195e4a7379f4ab8725ff68c1c8968ad3cc4d8733643509d531e` |
+| `src/p100_iq_gemm.cuh` | ours (new) | `e50bf72b75cc530510ee64299ce26fd358b9d9b00af0004bc2aee66fc136d739` |
+| `src/p100_moe.cu` | ours (new) | `8752b7afcc92de4d8bd65949b836e856bd517de92976a6227a26fce0e5216d8a` |
+| `src/p100_moe_rows.cuh` | ours (new) | `aba9e26d2b4e7064cd68ae6cece21c412b37c5d28b732b95318c37fc0e94ef9f` |
 | `src/p100_over.hpp` | ours (new) | `ee4decf5138ff656fdfea8dfd6059d684871e3ae2c153077b1c88586f0a93f15` |
 | `src/peer_probe.hpp` | Strata v0.2.10, unchanged | `e5bc045c8f97d25b4cfc5c3b3d0e7b1f7d0cc258a6756ea13ceb7283fe2a0554` |
-| `src/pf_common.cuh` | Strata v0.2.10, modified by us | `6e438dd5894222f71e704b84d0c010853dda7b1eaecf6193b6ac0558867934a2` |
+| `src/pf_common.cuh` | Strata v0.2.10, modified by us | `5515e525fd5036bfecf7facb806b1622a89df0a183a0d1dc58d4b0be5328c116` |
 | `src/pf_ring_plan.hpp` | Strata v0.2.10, unchanged | `ce52cb8fc7812a9ecd31742d0c3c35999a62e1c6d3cb8d2f7ba971806aff59aa` |
-| `src/prefill.cu` | Strata v0.2.10, modified by us | `b69fa0c9685131c468917074578d61be2810fad57ac72c60db83da803981f74b` |
+| `src/prefill.cu` | Strata v0.2.10, modified by us | `a41eb165df98d8f643742f1b7355f22baef03846903edad896df082e3e940cfa` |
 | `src/qsa.cuh` | Strata v0.2.10, modified by us | `7e94bdde945da43bb627c9bf7ed6fa8ff37a836741db8ebf1b5119dc6bba2d51` |
 | `src/rope.hpp` | Strata v0.2.10, unchanged | `91c54cfda3b34a0f4c515b35c11a57d2b76a6662e350b86a71dd73bd455568a1` |
 | `src/rope_gguf.hpp` | Strata v0.2.10, unchanged | `72ca61924332a6ef312f0a2ddf2fa6ace8368aee02e892fdb66333aebac19e56` |

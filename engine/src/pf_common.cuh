@@ -184,9 +184,15 @@ static __global__ void k_pfr_out_chk(const __half2* __restrict__ ag, float2* __r
 // copy into the next card is followed by a flag there; the step after waits on this card's flag (stream memory
 // operations: no SM time, no host). Both files' ring shapes run it: Flash-Next's PfRing and the 27B's Pf, which holds
 // the same buffers and takes its sequence number and copy-engine stream from itself rather than from the caller.
+// rs_only (FNX_PF_SP, sp_patch.py): the reduce-scatter alone: this card's finished part back into x (the other parts of x keep
+// what they held), no finished part sent on; the step flags still go, so a card's next sum into a set waits until the other
+// card has read its slot. The ring plan only (not the direct gather)
 template <typename Ring>
-inline void pf_ring_run(const Ring& r, int dev, int g, float* x, int C, unsigned seq, unsigned* err, cudaStream_t s) {
+inline void pf_ring_run(const Ring& r, int dev, int g, float* x, int C, unsigned seq, unsigned* err, cudaStream_t s, bool rs_only = false) {
     if (r.plan.empty() || r.plan.front().part != g) throw std::runtime_error("prefill: the ring's plan is not card " + std::to_string(g) + "'s");
+    if (rs_only)
+        for (const PfRingOp& o : r.plan)
+            if (o.k == PfRingOp::GADD) throw std::runtime_error("prefill: the reduce-scatter alone takes the ring plan, not the direct gather");
     const int set = (int) (seq & 1u), fin_part = (g + 1) % NCARD;   // the part this card finishes (pf_ring_plan)
     __half* const own_ag = r.dma ? r.dag[set] : r.ag[set];             // where this card's gathered rows are (device with DMA, host without)
     auto r0 = [&](int k) { return k * C / NCARD; };
@@ -243,6 +249,7 @@ inline void pf_ring_run(const Ring& r, int dev, int g, float* x, int C, unsigned
                 break;
             case PfRingOp::SEND: copy(r.nin[o.hop][set], r.send, rows(o.part)); break;
             case PfRingOp::PASS:
+                if (rs_only) break;
                 if (rows(o.part) > 0) {
                     const size_t off = (size_t) r0(o.part) * N;
                     if (o.part == fin_part && r.dma)   // the part finished here: device -> the next card's host gather buffer, by DMA
@@ -287,6 +294,12 @@ inline void pf_ring_run(const Ring& r, int dev, int g, float* x, int C, unsigned
             case PfRingOp::SIGNAL: signal(o.step); break;
             case PfRingOp::WAIT: wait(o.step); break;
             case PfRingOp::OUT:
+                if (rs_only) {
+                    if (rows(fin_part) > 0)
+                        k_pfr_out<<<grid_for((size_t) rows(fin_part) * N / 2), 256, 0, s>>>((const __half2*) (own_ag + (size_t) r0(fin_part) * N),
+                                                                                        (float2*) (x + (size_t) r0(fin_part) * N), rows(fin_part) * N / 2);
+                    break;
+                }
                 // the parts that arrived (everything but the one finished here) go to device memory by DMA, then one kernel reads it all
                 if (r.dma)
                     for (int p = 0; p < NCARD; ++p)

@@ -14,10 +14,10 @@
 modified, or new, with its SHA-256. [docs/upstream-v0.2.10.diff](docs/upstream-v0.2.10.diff) is every change against
 Strata v0.2.10's `src/split/`. The paths in sFNX's `NOTICE.md` (`src/split/...`) are `engine/...` here.
 
-Not included and not redistributed: the model files (ISTA-DASLab's GGUF, Qwen's checkpoint for the MTP layer), Strata's
+Not included and not redistributed: the model files (ISTA-DASLab's and Unsloth's GGUF, Qwen's checkpoint for the MTP layer), Strata's
 server and tools, and llama.cpp (`build.sh` fetches the headers it needs).
 
 Ideas taken from others, with thanks: the 16-bit form of the byte dot product (`fnx_dp4a_xmad`) from KaneQuah/Kmic-68's
 llama.cpp fork (commit `99eb48176d`); a host thread per card that copies missing experts with the copy engine
 (`FNX_P100_DMA`) from DeepInfer; the inline-assembly register constraint in `fnx_dp4a_vmad` from Strata PR #4274; the
-expert pool floor from Strata 0.2.12 (commit `20885f7a`).
+expert pool floor from Strata 0.2.12 (commit `20885f7a`); `FNX_PF_TAIL_MIB=4096` for UD-Q4_K_XL from a tester's recipe for that file.

@@ -8,6 +8,7 @@
 #include "p100_over.hpp"
 
 #include <cuda_runtime.h>
+#include <sys/mman.h>
 #include <unistd.h>
 
 #include <algorithm>
@@ -468,6 +469,9 @@ Engine::Engine(Model& m, int max_ctx, int lanes) : m_(m), max_ctx_(max_ctx) {
             }
             if (!more) break;
             if (round == 8) throw std::runtime_error("FNX_ARENA: VRAM still short after placing the experts again 8 times");
+            if (!m.perm.empty())   // the permanent experts have no host copy: they cannot be placed again
+                throw std::runtime_error("FNX_EXPERT_DYN_GIB: VRAM short by " + std::to_string(short_mib) + " MiB on a card (" + std::to_string(more) +
+                                         " slots): raise FNX_EXPERT_RAM_GIB by about " + std::to_string((short_mib * NCARD + 1023) / 1024) + " GiB");
             // two 32 GB cards are short by design; on three or more the experts fit unless something else holds VRAM
             std::fprintf(stderr, "fnx: VRAM short by %zu MiB on a card%s: %d more of the coldest experts to RAM\n", short_mib,
                          NCARD >= 3 ? " (another process on it?)" : "", more);
@@ -535,6 +539,13 @@ Engine::Engine(Model& m, int max_ctx, int lanes) : m_(m), max_ctx_(max_ctx) {
             const size_t room = (size_t) (ec.n[p] - keep) * ec.slot_bytes[p] + (arena_slot_off(c) - (size_t) n_pages * page);
             arena_cap_ = std::min(arena_cap_, n_pages + (int) (room / page));
         }
+        // FNX_EXPERT_DYN_GIB: the K/V pool grows only into the arena pool's dynamic slots; short of the context, a long request
+        // would find it full half-way, so the load says so now
+        if (const int need = max_ctx / KVP_POS + 2 + extra_pages; !m.perm.empty() && arena_cap_ < need)
+            throw std::runtime_error("FNX_EXPERT_DYN_GIB: the K/V pool reaches " + std::to_string(arena_cap_ * KVP_POS) + " positions, --max-context " +
+                                     std::to_string(max_ctx) + " needs " + std::to_string(need - arena_cap_) + " more pages (" +
+                                     std::to_string((size_t) (need - arena_cap_) * kvp_page(0) * sizeof(uint16_t) >> 20) +
+                                     " MiB a card) of the arena pool's dynamic slots: raise FNX_EXPERT_DYN_GIB or lower --max-context");
     } else {
         prefill_stages();
     }
@@ -609,8 +620,14 @@ Engine::Engine(Model& m, int max_ctx, int lanes) : m_(m), max_ctx_(max_ctx) {
             }
             std::sort(rs.begin(), rs.end(), [](const auto& a, const auto& b) { return a.second > b.second; });
         }
-        prefill_alloc();
-        prefill_stages();
+        try {
+            prefill_alloc();
+            prefill_stages();
+        } catch (const std::exception& e) {
+            if (m.perm.empty()) throw;
+            throw std::runtime_error(std::string(e.what()) + " (FNX_EXPERT_DYN_GIB: the prompt path's buffers go in the pools' last dynamic slots, "
+                                                             "too few of them: raise FNX_EXPERT_DYN_GIB)");
+        }
         size_t left = 0, lent = 0;
         for (const auto& r : pf_ranges_[0]) left += r.second;
         for (int p = 0; p < m.cards[0].ec.n_pools; ++p) lent += (size_t) pf_tail_[0][p] * m.cards[0].ec.slot_bytes[p];
@@ -692,8 +709,10 @@ void Engine::arena_fill(int c, cudaStream_t st) {
         if (ec.pool_of[l] == p)
             for (int e = 0; e < NEXP; ++e) {
                 const size_t i = (size_t) l * NEXP + e;
-                epg[i] = w.ec_host_gu[i];
-                epd[i] = w.ec_host_dn[i];
+                // FNX_EXPERT_DYN_GIB: a permanent expert has no host copy and never leaves its own VRAM block
+                const bool perm = !w.perm_gu.empty() && w.perm_gu[i];
+                epg[i] = perm ? w.perm_gu[i] : w.ec_host_gu[i];
+                epd[i] = perm ? w.perm_dn[i] : w.ec_host_dn[i];
             }
     // the slots' experts in one kernel reading their host copies (a copy call each ran the cards one after another)
     std::vector<int> list{n};
@@ -1229,6 +1248,43 @@ void Engine::embed_rows(int p0, int T, const std::function<int(int)>& tok_at_cel
         const int t = tok_at_cell(q);
         return t >= IMAGE_TOK ? m_.ple_image : t;
     };
+    // FNX_PLE_RAM=0: the table is the file's mapping (model_loaded), so a row not in the page cache is a disk read; asked for all
+    // at once the reads overlap (MADV_WILLNEED starts them and returns), where the loop below alone would wait for one at a time.
+    // The same rows as the loop's, each page asked for once
+    static const bool ple_file = env_int("FNX_PLE_RAM", 1) == 0;
+    if (ple_file) {
+        constexpr uintptr_t PG = 4096;
+        std::vector<uintptr_t> pages;
+        pages.reserve((size_t) T * (PLE_ORDERS - 1) * 8 * 2);
+        for (int t = 0; t < T; ++t) {
+            const int p = p0 + t;
+            int64_t ctx[PLE_ORDERS];
+            ctx[0] = tok_at(p);
+            bool cut = false;
+            for (int s = 1; s < PLE_ORDERS; ++s) {
+                const int q = p - s;
+                const int64_t tk = q >= 0 ? tok_at(q) : -1;
+                cut = cut || tk < 0 || tk == m_.ple_eos;
+                ctx[s] = cut ? m_.ple_eos : tk;
+            }
+            for (int n = 2; n <= PLE_ORDERS; ++n) {
+                uint64_t mixed = (uint64_t) ctx[0] * m_.ple_mult[0];
+                for (int j = 1; j < n; ++j) mixed ^= (uint64_t) ctx[j] * m_.ple_mult[j];
+                for (int gi = 0; gi < 8; ++gi) {
+                    const int h = (n - 2) * 8 + gi;
+                    const uintptr_t a = (uintptr_t) (pt.data + (mixed % m_.ple_vocab[h] + m_.ple_off[h]) * prb);
+                    for (uintptr_t q = a / PG * PG; q < a + prb; q += PG) pages.push_back(q);
+                }
+            }
+        }
+        std::sort(pages.begin(), pages.end());
+        for (size_t i = 0; i < pages.size();) {   // runs of whole pages, one call each
+            size_t j = i + 1;
+            while (j < pages.size() && pages[j] <= pages[j - 1] + PG) ++j;
+            madvise((void*) pages[i], pages[j - 1] + PG - pages[i], MADV_WILLNEED);
+            i = j;
+        }
+    }
     for (int t = 0; t < T; ++t) {
         const int p = p0 + t;
         embed_token(tok_at_cell(p), p, emb + (size_t) t * N);
@@ -1488,7 +1544,9 @@ void Engine::ffn_half(int T, int call, CardBuf& b, const CardW& w, const LayerW&
     hc_read(R, b.bo_a, b.inj_a, L.hc_norm[1], L.hc_down[1], L.hc_up[1], L.hc_inj[1], m_.eps, b.mixed, b.inj_f, b.hcs, b.ring.err, T, b.st, b.xq);
     // the shared expert (rows P + t of part): its gate|up in the router's launch and its swiglu and down in the routed
     // gate|up's (Q4_K experts), else on the second stream (a fork and a join cost ~5 us more than the launches' blocks)
-    const bool sh_in = L.gu_e.type == T_Q4_K && L.sh_gu.s.q && L.sh_down.s.q && ffs % 32 == 0 && ffs <= SH_MAXF;
+    // FNX_SH_IN=0 (q4x_patch.py): Q4_K layers take the row path like the others (the P100 row kernel knows Q4_K now)
+    static const bool sh_in_q4k = env_int("FNX_SH_IN", 1) != 0;
+    const bool sh_in = sh_in_q4k && L.gu_e.type == T_Q4_K && L.sh_gu.s.q && L.sh_down.s.q && ffs % 32 == 0 && ffs <= SH_MAXF;
     // FNX_RR_ORDER (idea 60): 0 the branch launched before the router; 1 forked before it but launched after it (the router's
     // blocks get the SMs first); 2 forked after the router's end
     static const int rr_order = [] {
@@ -1615,7 +1673,7 @@ void Engine::ffn_half(int T, int call, CardBuf& b, const CardW& w, const LayerW&
     if (!sh_in) ck(cudaStreamWaitEvent(b.st, b.join, 0), "join wait");
     // FNX_PREFETCH: this layer's experts done with, the next layer's guessed ones take slots and the copier copies them while its
     // attention half runs (a layer that takes the same path: its window waits for them before its first phase)
-    if (prefetch_ && T >= prefetch_min_t_ && over && dma && !sh_in && lyr + 1 < NL && w.L[(size_t) lyr + 1].gu_e.type != T_Q4_K) {
+    if (prefetch_ && T >= prefetch_min_t_ && over && dma && !sh_in && lyr + 1 < NL && (!sh_in_q4k || w.L[(size_t) lyr + 1].gu_e.type != T_Q4_K)) {
         const LayerW& Ln = w.L[(size_t) lyr + 1];
         prof_mark(b, PK_CACHE);
         if (fold & 4) p100_pf_plan_publish(b.dma, b.pf_guess, T, lyr + 1, w.ec, b.pf_want, b.pf_list, Ln.gu_e_stride, Ln.down_e_stride, b.st);

@@ -72,6 +72,7 @@
   "FNX_PF_PREP": "1",
   "FNX_PF_STAGE_ALL": "1",
   "FNX_PF_STAGE_MIB": "1024",
-  "FNX_PF_TAIL_MIB": "3000"
+  "FNX_PF_TAIL_MIB": "3000",
+  "FNX_PF_SP": "1"
  }
 }

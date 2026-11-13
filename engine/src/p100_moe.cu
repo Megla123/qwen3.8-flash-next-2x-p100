@@ -602,6 +602,10 @@ void p100_moe_mode(const DW& A, size_t sa, const BigJob* jobs, const int* njobs,
         case T_IQ2_S: P100_JOB(22); break;
         case T_IQ4_XS: P100_JOB(23); break;
         case T_IQ4_NL: P100_JOB(20); break;
+        case T_Q4_K: P100_JOB(12); break;   // q4x_patch.py
+        case T_Q5_K: P100_JOB(13); break;
+        case T_Q5_1: P100_JOB(7); break;
+        case T_Q8_0: P100_JOB(8); break;
         case T_Q4_0: P100_JOB(2); break;
         case T_IQ2_XXS: job_launch<16>(a, njobs_cap, s); break;
         case T_IQ1_M: job_launch<29>(a, njobs_cap, s); break;
