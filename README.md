@@ -508,6 +508,39 @@ none of them was measured on another machine.
 - **Other Pascal cards** (P40, GTX 10x0, sm_61): not supported. The engine refuses an architecture it was not built for,
   and its kernels are built on FP16 arithmetic, which those chips run at a small fraction of the P100's rate.
 - **Three or four cards:** Strata's code has them; this port has only run on two.
+- **An older processor** (no AVX2, e.g. Sandy Bridge or Ivy Bridge Xeons): the engine and Strata's server need none, but
+  Strata's picture encoder is built for an AVX2 baseline by default; on Sandy Bridge-EP NVIDIA's driver also runs the
+  cards at PCIe Gen2 unless told otherwise. `tune/check.py` checks both (next section).
+
+## Tuning for your machine (tune/)
+
+Two tools, described in [tune/README.md](tune/README.md):
+
+```bash
+python3 tune/check.py --data /data/flash-next --out report.md   # about a minute, no model loaded
+python3 tune/tune.py --data /data/flash-next --screen           # 2-3 hours, one load per candidate
+```
+
+- **`check.py`** reads the cards, each card's PCIe path up to the CPU, the processor, RAM, NUMA, the IOMMU and the disk
+  with the model; measures host-to-card copies from pinned memory and the disk; picks the profile for your RAM and names
+  what limits your machine against ours, with advice. Each piece of advice says whether it rests on a measurement on our
+  machine or is only what the design implies. The report is written to paste into a GitHub issue. Run it with the cards
+  free; the copy test skips a card that is in use.
+- **`tune.py`** measures the switches that give the same bits (`FNX_PREFETCH_WANT`, `FNX_PREFETCH_MIN_T`,
+  `FNX_DMA_SPLIT`, `FNX_EXPERT_RAM_GIB`, `FNX_EXPERT_DYN_GIB`, `FNX_PLE_RAM`, `--conversation-cache-mib`; the staging
+  buffers on request) on your machine, each candidate on a freshly loaded engine with a shortened benchmark, and keeps a
+  change only when it wins by more than the noise it measured between two baseline runs and a final run confirms it. It
+  checks the RAM before each load, stops when the machine keeps swapping, compares every arm's first-token logits with
+  your starting profile's, and writes `DATA/profile.tuned.json`. `FNX_ROUTE_PRIOR` is tried only with `--allow-lossy`;
+  `--coder`'s expert mask is never changed.
+- **On our machine** (13 Nov 2026, a test window, the IQ3_S 512k profile at `FNX_ROUTE_PRIOR=0`, engine `c213636c`):
+  `check.py` measured 12.3 GB/s to each card, the same from the other CPU's memory and with both cards at once, Gen3 x16
+  while copying, and found no bottleneck. `tune.py --screen --only prefetch,dma` took 7 loads (about 70 minutes): the
+  two baselines gave fresh 66.7-67.0, edits 111.0 / 115.9-116.1 and a 38,862-token read at 961-962 tok/s (noise 0.5 % or
+  less, writing after the long read 2.1 %); 2, 3 or 4 guessed next-layer copies a row were within 1 % of the profile's
+  6 (9: −5 %), prefetch off, `FNX_PREFETCH_MIN_T=2` and `FNX_DMA_SPLIT=1` were in the noise, `FNX_DMA_SPLIT=0` cost 4 %
+  in edits. It kept the profile as it is, and every arm's first-token logits were the baseline's bit for bit (19 of 19).
+  It has not run on another machine yet; results from other machines are welcome as issues.
 
 ## Known limitations
 
