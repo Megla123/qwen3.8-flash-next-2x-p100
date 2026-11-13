@@ -78,6 +78,15 @@ UD-Q4_K_XL", has what they gave.
 | `FNX_SH_IN` | 0 | unset (1) | ours: 0 sends the Q4_K layers through the P100 row kernel with the shared expert beside it, instead of Strata's decode kernels with the shared expert inside (writing +7 %; rounding) |
 | `FNX_PREFETCH_MIN_T`, `FNX_PREFETCH_WANT` | 2, 2 | 4, 6 | next-layer copies from windows of 2 rows on, of 2 guessed experts a row: every guessed copy is 1.46 MiB a card that competes with the window's own missing experts on PCIe. Edits at 512k (our rounds `q4k5`, `q4k7`, py / md tok/s): 9 a row 54 / 57, 6 a row 67.4-67.9 / 69.3-70.3, 4: 73.5-75.3 / 78.1-79.3, 3: 76.1-77.7 / 81.7-83.3, 2: 77.4-78.0 / 81.9-84.3, prefetch off: 72.2-72.6 / 77.2-78.1; fresh writing 55.8-57.5 in all. With IQ3_S, 4 a row and from 2 rows gave nothing |
 
+## The Coder experts
+
+Off in every template; `fill_profile.py --coder` (or `setup.sh --coder`) sets it, with either model file. README, "Coder",
+has what it gave.
+
+| Switch | Coder profile | Unset | Origin | What it does | Output effect |
+|---|---|---|---|---|---|
+| `FNX_EXPERT_MASK` | `engine/data/coder_mask.txt` | unset | ours | a file with one line a layer: the layer, then the experts the router may pick (`#` lines are comments; every layer needs at least 10). A dropped expert's router logit becomes −inf wherever a layer's logits are read (the decode windows' router, the prompt path's, the next layer's guesses), so no top 10 or guess takes it, and the ten picks' weights are a softmax over them, as in a pruned model. In placement a dropped expert ranks below every kept one, so `FNX_EXPERT_RAM_GIB` sends the dropped ones to RAM first, the prompt path never stages them and the expert cache never refills a slot with one. The MTP draft layer is not masked. RAM use stays the same: every expert is still loaded | lossy: a different model by design. Unset, the code takes no branch and launches nothing: the same bits (KL 0, 27 of 27 against `bf9c7f1f`) |
+
 ## Our other switches
 
 Off, or at the value the engine picks, unless you set them. None is needed to reproduce our numbers.

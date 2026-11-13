@@ -1150,7 +1150,7 @@ size_t Engine::pf_stage_bytes(int c) const {
     for (int l = 0; l < NL; ++l) {
         size_t n = 0;
         if (all && l == NL - 1) continue;   // the last layer runs no experts while reading
-        for (int e = 0; e < NEXP; ++e) n += !all && m_.resident[(size_t) l][(size_t) e] ? 0 : 1;
+        for (int e = 0; e < NEXP; ++e) n += (!all && m_.resident[(size_t) l][(size_t) e]) || !m_.kept(l * NEXP + e) ? 0 : 1;   // FNX_EXPERT_MASK: dropped ones never staged
         most = std::max(most, n * (w.L[(size_t) l].gu_e_stride + w.L[(size_t) l].down_e_stride));
     }
     const long long stage_mib = env_int("FNX_PF_STAGE_MIB", 384);
@@ -1382,7 +1382,7 @@ void Engine::prefill_pass(const std::vector<PfChunk>& chunks, bool staging, cons
             for (int l = 0; l < NL; ++l) {
                 const size_t gs = w.L[(size_t) l].gu_e_stride, ds = w.L[(size_t) l].down_e_stride;
                 int n_ram = 0;
-                for (int e = 0; e < NEXP; ++e) n_ram += p.slot_h[l * NEXP + e] < 0 ? 1 : 0;
+                for (int e = 0; e < NEXP; ++e) n_ram += p.slot_h[l * NEXP + e] < 0 && m_.kept(l * NEXP + e) ? 1 : 0;   // FNX_EXPERT_MASK: a dropped one is never staged
                 const int fit = std::min(n_ram, (int) (p.stage_bytes / (gs + ds)));
                 char* gu_at = p.stage[l & 1];
                 char* dn_at = gu_at + (size_t) fit * gs;
@@ -1402,6 +1402,8 @@ void Engine::prefill_pass(const std::vector<PfChunk>& chunks, bool staging, cons
                         const int q = ec.pool_of[l];
                         const char* at = ec.pool[q] + (size_t) (s - ec.s0[q]) * ec.slot_bytes[q];
                         p.ep_hgu[i] = at, p.ep_hdn[i] = at + ec.dn_off[q];
+                    } else if (!m_.kept((int) i)) {   // FNX_EXPERT_MASK (maska_patch.py): never picked, so never copied or read
+                        p.ep_hgu[i] = w.ec_host_gu[i], p.ep_hdn[i] = w.ec_host_dn[i];
                     } else if (k < fit) {
                         p.ep_hgu[i] = gu_at + (size_t) k * gs, p.ep_hdn[i] = dn_at + (size_t) k * ds;
                         add(w.ec_host_gu[i], gu_at + (size_t) k * gs, gs);
@@ -1640,6 +1642,7 @@ void Engine::prefill_pass(const std::vector<PfChunk>& chunks, bool staging, cons
                     pf_prof_mark(b, PF_ROUTER);
                     k_bf16_f32<<<grid_for((size_t) (NEXP + 1) * N), 256, 0, s>>>(L.router, (size_t) (NEXP + 1) * N, p.router32);
                     pf_sgemm(p, p.router32, NEXP + 1, N, p.mixed, C, p.logits, NEXP + 1);
+                    expert_mask_logits(p.logits, C, NEXP + 1, b.ekeep ? b.ekeep + (size_t) l * (NEXP / 32) : nullptr, s);   // FNX_EXPERT_MASK (maska_patch.py)
                     k_pf_top10<<<(C + 7) / 8, 256, 0, s>>>(p.logits, C, p.topi, p.topw);
                     if (memo_ && &b == cb_[0]) memo_put_rows(p.topi, C, pos0[(size_t) j], l, memo_, memo_cap_, s);   // memo_patch.py
                     ckc(cudaMemsetAsync(p.cnt, 0, NEXP * 4, s), "cnt");
@@ -1809,6 +1812,7 @@ void Engine::prefill_pass(const std::vector<PfChunk>& chunks, bool staging, cons
                 pf_prof_mark(b, PF_ROUTER);
                 k_bf16_f32<<<grid_for((size_t) (NEXP + 1) * N), 256, 0, s>>>(L.router, (size_t) (NEXP + 1) * N, p.router32);
                 pf_sgemm(p, p.router32, NEXP + 1, N, p.mixed, C, p.logits, NEXP + 1);
+                expert_mask_logits(p.logits, C, NEXP + 1, b.ekeep ? b.ekeep + (size_t) l * (NEXP / 32) : nullptr, s);   // FNX_EXPERT_MASK (maska_patch.py)
                 k_pf_top10<<<(C + 7) / 8, 256, 0, s>>>(p.logits, C, p.topi, p.topw);
                 if (memo_ && &b == cb_[0]) memo_put_rows(p.topi, C, pos0[(size_t) j], l, memo_, memo_cap_, s);   // memo_patch.py
                 ckc(cudaMemsetAsync(p.cnt, 0, NEXP * 4, s), "cnt");

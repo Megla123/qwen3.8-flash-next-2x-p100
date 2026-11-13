@@ -16,6 +16,7 @@
 #   bash setup.sh /data/flash-next --models /mnt/models --no-pictures --route-prior 0.15
 #   bash setup.sh /data/flash-next --ram 64                   # a machine with 64 GB of RAM (README, "64 GB of RAM")
 #   bash setup.sh /data/flash-next-q4 --model q4_k_xl         # Unsloth's UD-Q4_K_XL (README, "Unsloth's UD-Q4_K_XL")
+#   bash setup.sh /data/flash-next-coder --models /data/flash-next/models --coder   # the Coder's experts only (README, "Coder")
 #
 # Options:
 #   --model M        iq3_s (default): ISTA-DASLab's GSQ-RCO IQ3_S; q4_k_xl: Unsloth's UD-Q4_K_XL (512k, needs 96 GB of RAM)
@@ -24,6 +25,8 @@
 #   --no-pictures    no projector download, no encoder build, a profile without pictures
 #   --route-prior X  FNX_ROUTE_PRIOR in the profile: 0 (default) is exact; 0.15 is our production setting, faster, lossy
 #   --ram 64         the 64 GB mode in the profile (262,144 positions, the lookup table from the disk; IQ3_S only); default 96
+#   --coder          route only to the 256 experts a layer that ISTA-DASLab's Coder release keeps (FNX_EXPERT_MASK): faster,
+#                    lossy, for code; with either file
 #   --check          only check and report
 # Environment: HF_TOKEN (sent to Hugging Face if set), CUDA, HOSTCXX (as for build.sh), JOBS (encoder build, default 6).
 set -euo pipefail
@@ -51,10 +54,10 @@ declare -A SHA=([${IQ3_S[0]}]=4c1eb2ceb4915e1192f4f386021897bde56a97f40a0bb78bb8
                 [${Q4_K_XL[3]}]=5de8b5dbf89409acc39468decafd4a4a95b13c29d88a14b0356107897829ec36
                 [$MMPROJ]=b1a82259702816a5330d7bd7607cd9676b11780e79ff7348c21103ff3ce49bd0)
 
-[ $# -ge 1 ] && [ "${1#-}" = "$1" ] || die "usage: bash setup.sh DATA [--model iq3_s|q4_k_xl] [--models DIR] [--strata DIR] [--no-pictures] [--route-prior X] [--ram 96|64] [--check]"
+[ $# -ge 1 ] && [ "${1#-}" = "$1" ] || die "usage: bash setup.sh DATA [--model iq3_s|q4_k_xl] [--models DIR] [--strata DIR] [--no-pictures] [--route-prior X] [--ram 96|64] [--coder] [--check]"
 DATA=$1
 shift
-MODEL=iq3_s MODELS='' STRATA='' PICTURES=1 PRIOR=0 RAM=96 CHECK=0
+MODEL=iq3_s MODELS='' STRATA='' PICTURES=1 PRIOR=0 RAM=96 CODER=0 CHECK=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --model) MODEL=${2:?--model iq3_s or q4_k_xl}; [ "$MODEL" = iq3_s ] || [ "$MODEL" = q4_k_xl ] || die "--model: iq3_s or q4_k_xl"; shift 2 ;;
@@ -63,6 +66,7 @@ while [ $# -gt 0 ]; do
     --no-pictures) PICTURES=0; shift ;;
     --route-prior) PRIOR=${2:?--route-prior X}; shift 2 ;;
     --ram) RAM=${2:?--ram 96 or 64}; [ "$RAM" = 96 ] || [ "$RAM" = 64 ] || die "--ram: 96 or 64"; shift 2 ;;
+    --coder) CODER=1; shift ;;
     --check) CHECK=1; shift ;;
     *) die "unknown option $1" ;;
   esac
@@ -256,9 +260,11 @@ else
   mkdir -p "$DATA/logs"
   vis=()
   [ "$PICTURES" = 1 ] && vis=(--vision-exe "$VISION")
+  coder=()
+  [ "$CODER" = 1 ] && coder=(--coder)
   python3 "$HERE/profile/fill_profile.py" --models "$MODELS" --mtp "$PREP/mtp-rt" --tokenizer "$PREP/tokenizer" \
-    ${vis[@]+"${vis[@]}"} --logs "$DATA/logs" --model "$MODEL" --route-prior "$PRIOR" --ram "$RAM" --gpu "$GPU_LIST" --exe "$EXE" \
-    --out "$CFG"
+    ${vis[@]+"${vis[@]}"} ${coder[@]+"${coder[@]}"} --logs "$DATA/logs" --model "$MODEL" --route-prior "$PRIOR" --ram "$RAM" \
+    --gpu "$GPU_LIST" --exe "$EXE" --out "$CFG"
 fi
 
 if [ "$CHECK" = 1 ]; then

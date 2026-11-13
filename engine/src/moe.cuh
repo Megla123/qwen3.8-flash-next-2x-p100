@@ -318,7 +318,8 @@ __global__ void __launch_bounds__(RR_THREADS) k_router_route(const uint16_t* __r
     __syncthreads();
     for (int q = e; q < T * RR_ROWS; q += RR_THREADS) {
         const int t = q / RR_ROWS, r = q % RR_ROWS, lrow = blockIdx.x * RR_ROWS + r;
-        if (lrow < L) logits[(size_t) t * L + lrow] = rsum[t][r][0] + rsum[t][r][1];
+        if (lrow < L)   // FNX_EXPERT_MASK (maska_patch.py): a dropped expert is never picked
+            logits[(size_t) t * L + lrow] = lrow < NEXP && rt.keep && !(rt.keep[lrow >> 5] >> (lrow & 31) & 1u) ? -INFINITY : rsum[t][r][0] + rsum[t][r][1];
     }
     __shared__ bool last;
     if (rr_t && e == 0) atomicMax(&rr_tt[rr_tn & 4095u][7], rr_now());

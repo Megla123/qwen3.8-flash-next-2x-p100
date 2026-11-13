@@ -7,6 +7,7 @@
 | `engine/src/iq3s_x.cuh` | generated from ggml's `ggml-cuda/vecdotq.cuh` (llama.cpp commit `3cf03257f219afbe7334045ff7c6a06ac68c627d`) with its dot product swapped for ours | MIT, The ggml authors, [third_party/ggml/LICENSE](third_party/ggml/LICENSE) |
 | `engine/data/expert-routes.bin`, `engine/data/draft_vocab_en.bin` | sFNX's data files, as Strata v0.2.10 ships them (byte-identical) | MIT (sFNX) |
 | `engine/data/draft_vocab_sl.bin` | ours: `draft_vocab_en.bin` plus 8,621 token ids chosen with Strata's `tools/draft_vocab.py --corpus` from 1,483 random articles of the Slovenian Wikipedia (the text is not included) | MIT (ours) |
+| `engine/data/coder_mask.txt` | the experts ISTA-DASLab's Coder release keeps, from its allocation list (Hugging Face `ISTA-DASLab/Qwen3.8-Flash-Next-GSQ-RCO-Coder-GGUF`), rewritten by our `scripts/coder_mask.py` | Apache-2.0, [third_party/ista-daslab/](third_party/ista-daslab/) |
 | `engine/p100_compat.h`, `engine/src/p100_*`, the changes to the other files | ours | MIT (ours) |
 | `CMakeLists.txt`, `build.sh`, `setup.sh`, `run.sh`, `scripts/`, `profile/`, `bench/`, `docs/`, `history/` | ours; `bench/bench.py` reads its texts from a Strata checkout at run time | MIT (ours) |
 

@@ -2,13 +2,15 @@
 
 Compared with Strata v0.2.10 (`github.com/Niko1221/Strata`, commit `ffa80d73133ea5c548aefe57889a16e8085a938f`), directory `src/split/`.
 Strata's `src/split/` is itself a port of sFNX by John Fink (`third_party/sfnx/NOTICE.md`). The full diff is `upstream-v0.2.10.diff`.
-SHA-256 values are those of the sources of our production engine for UD-Q4_K_XL (`strata-split-2`, binary SHA-256
-`c213636ce3de2182…`, 13 Nov 2026); with its switches at their defaults it is our IQ3_S production engine (`bf9c7f1f…`) bit for bit
-(see README, "Our numbers").
+SHA-256 values are those of the sources of our Coder engine (`strata-split-2`, binary SHA-256 `40ef6d531143d73d…`,
+13 Nov 2026): our production engine for UD-Q4_K_XL (`c213636ce3de2182…`) with `history/patches/maska_patch.py` applied.
+With `FNX_EXPERT_MASK` unset it is our IQ3_S production engine (`bf9c7f1f…`) bit for bit (see README, "Our numbers" and
+"Coder").
 
 | File | Origin | SHA-256 |
 |---|---|---|
 | `CMakeLists.txt` | Strata v0.2.10, modified by us | `f6e24d0eb63c32140a383e524a81f355b6b828a5cc805d1c427b9180bb75b505` |
+| `data/coder_mask.txt` | ours (data): the experts ISTA-DASLab's Coder release keeps (Apache-2.0), from its allocation list by scripts/coder_mask.py | `a38e41c274adb1421adc3589806aff96c7ff1ab4c57ed5e214cb06561e51937d` |
 | `data/draft_vocab_en.bin` | Strata v0.2.10, unchanged (from sFNX) | `369151522226a5edaa5f12cfd1e2ae7db8f4fbdbd222f3dcf327dced9597fb25` |
 | `data/draft_vocab_sl.bin` | ours (data): Strata's tools/draft_vocab.py over Slovenian Wikipedia, base data/draft_vocab_en.bin | `3e3fa1a67d8dbe0989ff682758eb9467ee827174ab3471086b6794b81e50620b` |
 | `data/expert-routes.bin` | Strata v0.2.10, unchanged (from sFNX) | `8d6911494194efb24f0627001d33304a1e6664d5ae6363b09ccb025fc6f52930` |
@@ -20,10 +22,10 @@ SHA-256 values are those of the sources of our production engine for UD-Q4_K_XL 
 | `src/card_check.hpp` | Strata v0.2.10, unchanged | `704aeda84671d56f6021321ee04562562ffa2358661b73312399184396558320` |
 | `src/card_split.hpp` | Strata v0.2.10, unchanged | `0e211d82a6b0560078e9b5a6e2e681394b412f5344c08b92f877dc9fc0b0e2cf` |
 | `src/dense.cuh` | Strata v0.2.10, modified by us | `1ca66d9ac98ea99c5f7dc388142cb04396440b2a8be38b2dd10e34ee4e2b62ba` |
-| `src/engine.cu` | Strata v0.2.10, modified by us | `b4b927dfc8e52f5045de9fa24b7007a84b85ecce12f8f245320c6bd6f8575c7c` |
+| `src/engine.cu` | Strata v0.2.10, modified by us | `2b716a3e31bbc2e2bae36afb9554e25ede5a6cb9b3e587d6ba2010151343e74f` |
 | `src/engine.hpp` | Strata v0.2.10, modified by us | `7c42647a14be2e63f20f7c6a56ab051d1dacf2a7e7da7cf8cab8f2f9fd4fe5c4` |
 | `src/engine_common.cu` | Strata v0.2.10, modified by us | `7787e092a92f2330fd08ccca8b6302f6ad65e2472c93de9aa5dead9f625b8bd9` |
-| `src/engine_impl.hpp` | Strata v0.2.10, modified by us | `f706d57b1302d9592c9eab23e7d4bf5cb0e8f2f12ec6bb3dc3dc65822fd51018` |
+| `src/engine_impl.hpp` | Strata v0.2.10, modified by us | `33c5f90a6c3a6f6db6a2416897b29b58523844f32ef6a9a0bb1d8abca2fb0fe1` |
 | `src/engine_parts.hpp` | Strata v0.2.10, modified by us | `4af1fd9aedf96f241d1f202ea924ea722adb63ea77942b5b1a658e6e2ffeba1e` |
 | `src/env.hpp` | Strata v0.2.10, unchanged | `4dc19a4a18ddc95fb1a3e1a60fb70821d78b459de626d70385e8339a402aa134` |
 | `src/gdn_core.cuh` | Strata v0.2.10, modified by us | `fd373392625b8f293722c2014ba4f337db0cd9dcdb5b56398d22ae21de5c83df` |
@@ -40,11 +42,11 @@ SHA-256 values are those of the sources of our production engine for UD-Q4_K_XL 
 | `src/hip/rccl_dl.hpp` | Strata v0.2.10, unchanged | `e7d9ea5291dd907900f81c9521f64dad9d94770d023513f9b2ac6ef78b805167` |
 | `src/hip/selftest_policy.hpp` | Strata v0.2.10, unchanged | `3ba715a7916f8900e76fc9b9e5464cdea053b51be1d0c28a8d68206dd7482cf9` |
 | `src/iq3s_x.cuh` | ours (new) | `b3e208682ef2a76e78c9b6154e792dc1f39129f8fd7de381bac8a6fd6568146a` |
-| `src/kernels.cu` | Strata v0.2.10, modified by us | `b83dd9425fbaf2835ddb55f46958826e9f45fa654033c2602c8a8354de174041` |
-| `src/kernels.hpp` | Strata v0.2.10, modified by us | `e9a8810cc67ca23a453e4dfd52b372102394f0503cfcf8824805257d4b701a69` |
-| `src/model.cpp` | Strata v0.2.10, modified by us | `dadbb90409c500209cad364959599f9d6c8cb14b6c91923c77a976910a570d7c` |
-| `src/model.hpp` | Strata v0.2.10, modified by us | `1e3dce28b15442381b5c917cee8fdc3d16431b8f4be535836e8057dd6fde4cfa` |
-| `src/moe.cuh` | Strata v0.2.10, modified by us | `276a289cf4234e8deed2d689b45b7d5f1342c90a1385b63964312eb53aabf60f` |
+| `src/kernels.cu` | Strata v0.2.10, modified by us | `d4dcf72c2197e089bf1ce1f56e5f47c230430b567dd640f59f4e8ec1862e1f2c` |
+| `src/kernels.hpp` | Strata v0.2.10, modified by us | `2a3462af98fa32cae21d5fd7bc283135b48a755b0b1c9bf2abcb6ec0f3eb9626` |
+| `src/model.cpp` | Strata v0.2.10, modified by us | `92f0a5194d373efefd71c9a18d75b2fbc9ac6396263da51bb66817531e4f41de` |
+| `src/model.hpp` | Strata v0.2.10, modified by us | `8afe18fa31518de0345444478f311a55f54c5ca420ad96f65e840f53e8d249e5` |
+| `src/moe.cuh` | Strata v0.2.10, modified by us | `cfdffc68ff915639d7ef036d7e35bd67320c37e44511cc0964d10671f46598ac` |
 | `src/moe_mma.cu` | Strata v0.2.10, modified by us | `c66a70054fee82feca74ecf594eff5095dc207d84cee478e373f83bc92079b92` |
 | `src/moe_mma.cuh` | Strata v0.2.10, unchanged | `67d3739844a7615dac39c3f6e4f034ef8818ee4898764df813a53b69003ab9a3` |
 | `src/moe_mma_iq.cuh` | Strata v0.2.10, unchanged | `a59ca799ba878a7d9e6efc387d0cc55e3f7d274f75ec728d1e81acef6970d0b9` |
@@ -61,7 +63,7 @@ SHA-256 values are those of the sources of our production engine for UD-Q4_K_XL 
 | `src/peer_probe.hpp` | Strata v0.2.10, unchanged | `e5bc045c8f97d25b4cfc5c3b3d0e7b1f7d0cc258a6756ea13ceb7283fe2a0554` |
 | `src/pf_common.cuh` | Strata v0.2.10, modified by us | `5515e525fd5036bfecf7facb806b1622a89df0a183a0d1dc58d4b0be5328c116` |
 | `src/pf_ring_plan.hpp` | Strata v0.2.10, unchanged | `ce52cb8fc7812a9ecd31742d0c3c35999a62e1c6d3cb8d2f7ba971806aff59aa` |
-| `src/prefill.cu` | Strata v0.2.10, modified by us | `a41eb165df98d8f643742f1b7355f22baef03846903edad896df082e3e940cfa` |
+| `src/prefill.cu` | Strata v0.2.10, modified by us | `c870fd8c82ea9825e8dd145cc90ac2997e570455f8411d553b79e644d9e0ea36` |
 | `src/qsa.cuh` | Strata v0.2.10, modified by us | `7e94bdde945da43bb627c9bf7ed6fa8ff37a836741db8ebf1b5119dc6bba2d51` |
 | `src/rope.hpp` | Strata v0.2.10, unchanged | `91c54cfda3b34a0f4c515b35c11a57d2b76a6662e350b86a71dd73bd455568a1` |
 | `src/rope_gguf.hpp` | Strata v0.2.10, unchanged | `72ca61924332a6ef312f0a2ddf2fa6ace8368aee02e892fdb66333aebac19e56` |
@@ -91,4 +93,4 @@ SHA-256 values are those of the sources of our production engine for UD-Q4_K_XL 
 | `tools/sfnx_input.hpp` | Strata v0.2.10, unchanged | `bbd3cbfc7369eae44ee85f8d10dcc421eaa549250a4e95cc125f77c2467eff69` |
 | `tools/sfnx_input_test.cpp` | Strata v0.2.10, unchanged | `432c1f4ff0c1bef3a40999baa8d6ec58f70f0561b734ae486134db7f4b34d809` |
 
-Totals: Strata v0.2.10, modified by us: 27; Strata v0.2.10, unchanged: 43; Strata v0.2.10, unchanged (from sFNX): 2; ours: 10
+Totals: Strata v0.2.10, modified by us: 27; Strata v0.2.10, unchanged: 43; Strata v0.2.10, unchanged (from sFNX): 2; ours: 11

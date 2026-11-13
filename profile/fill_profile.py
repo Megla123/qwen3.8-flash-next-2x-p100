@@ -19,6 +19,8 @@
 --gpu        the two P100 as nvidia-smi numbers them (default "0,1")
 --ram        96 (default): the template as it is; 64: the 64 GB mode (README, "64 GB of RAM"; IQ3_S only): FNX_PLE_RAM=0,
              FNX_EXPERT_DYN_GIB=13, --max-context 262144 without YaRN, --conversation-cache-mib 2000
+--coder      FNX_EXPERT_MASK=engine/data/coder_mask.txt: the router picks only from the 256 experts a layer that
+             ISTA-DASLab's Coder release keeps (README, "Coder"); faster, lossy, for code
 
 Every path the config names is checked; a missing one is reported and nothing is written. Anything else (the context
 length, other switches) is edited in the written JSON; docs/SWITCHES.md lists the switches.
@@ -52,6 +54,7 @@ def main():
     ap.add_argument("--exe", default=str(RELEASE / "build" / "split" / "strata-split-2"))
     ap.add_argument("--gpu", default="0,1")
     ap.add_argument("--ram", choices=["96", "64"], default="96", help="64: the 64 GB mode (README, \"64 GB of RAM\")")
+    ap.add_argument("--coder", action="store_true", help="only the Coder release's experts (README, \"Coder\")")
     ap.add_argument("--template", help="another template than the model's")
     ap.add_argument("--out", required=True)
     a = ap.parse_args()
@@ -96,6 +99,8 @@ def main():
         cfg["args"][cfg["args"].index("--conversation-cache-mib") + 1] = "2000"
         for k in ("FNX_ROPE_SCALE", "FNX_YARN_ORIG_CTX"):
             cfg["env"].pop(k)
+    if a.coder:
+        cfg["env"]["FNX_EXPERT_MASK"] = str(RELEASE / "engine" / "data" / "coder_mask.txt")
 
     native = Path(cfg["args"][cfg["args"].index("--native") + 1])
     need = [str(native.with_name(f)) for f in files] + [
@@ -105,12 +110,14 @@ def main():
             cfg["exe"]]
     if "vision" in cfg:
         need += [cfg["vision"]["exe"], cfg["vision"]["mmproj"]]
+    if "FNX_EXPERT_MASK" in cfg["env"]:
+        need.append(cfg["env"]["FNX_EXPERT_MASK"])
     missing = [p for p in need if not Path(p).exists()]
     if missing:
         sys.exit("missing, nothing written:\n  " + "\n  ".join(missing))
     Path(a.out).write_text(json.dumps(cfg, indent=1) + "\n", encoding="utf-8")
     print(f"wrote {a.out} ({a.model}, FNX_ROUTE_PRIOR={a.route_prior}, pictures {'on' if 'vision' in cfg else 'off'}, "
-          f"{a.ram} GB of RAM)")
+          f"{a.ram} GB of RAM{', the Coder experts' if a.coder else ''})")
 
 
 if __name__ == "__main__":

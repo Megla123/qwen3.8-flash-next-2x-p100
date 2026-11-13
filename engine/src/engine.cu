@@ -257,6 +257,13 @@ Engine::Engine(Model& m, int max_ctx, int lanes) : m_(m), max_ctx_(max_ctx) {
         b->att = dalloc<float>((size_t) MAXT * w.nq * HD);
         b->att_part = dalloc<float>(attn_scratch_floats(w.nq));
         b->logits = dalloc<float>((size_t) MAXT * (NEXP + 1));
+        if (!m_.keep.empty()) {   // FNX_EXPERT_MASK (maska_patch.py): the kept experts as bits, a layer's row NEXP / 32 words
+            std::vector<unsigned> bits((size_t) NL * NEXP / 32, 0u);
+            for (int i = 0; i < NL * NEXP; ++i)
+                if (m_.kept(i)) bits[(size_t) (i >> 5)] |= 1u << (i & 31);
+            b->ekeep = dalloc<unsigned>(bits.size());
+            ck(cudaMemcpy(b->ekeep, bits.data(), bits.size() * sizeof(unsigned), cudaMemcpyHostToDevice), "expert mask");
+        }
         b->topw = dalloc<float>(P);
         b->topi = dalloc<int>(P);
         b->njobs = dalloc<int>(2);
@@ -801,7 +808,7 @@ bool Engine::pf_refill_start(int mode) {
                 for (int l = 0; l < NL; ++l)
                     if (ec.pool_of[l] == p)
                         for (int e = 0; e < NEXP; ++e)
-                            if (const int g = l * NEXP + e; slot_of[(size_t) g] < 0 && !taken[(size_t) g]) out.push_back(g);
+                            if (const int g = l * NEXP + e; slot_of[(size_t) g] < 0 && !taken[(size_t) g] && m_.kept(g)) out.push_back(g);   // FNX_EXPERT_MASK
                 const size_t k = std::min(out.size(), (size_t) cnt - pick.size());
                 std::partial_sort(out.begin(), out.begin() + (long) k, out.end(), hotter);
                 pick.insert(pick.end(), out.begin(), out.begin() + (long) k);
@@ -976,7 +983,7 @@ void Engine::arena_refill(int c, int from, int to) {
     for (int l = 0; l < NL; ++l)
         if (ec.pool_of[l] == p)
             for (int e = 0; e < NEXP; ++e)
-                if (slot_of[(size_t) l * NEXP + e] < 0) out.push_back(l * NEXP + e);
+                if (slot_of[(size_t) l * NEXP + e] < 0 && m_.kept(l * NEXP + e)) out.push_back(l * NEXP + e);   // FNX_EXPERT_MASK: never a dropped one
     std::stable_sort(out.begin(), out.end(), [&](int a, int b) { return m_.score[(size_t) a] > m_.score[(size_t) b]; });
     if (ec.arena_full && to == 0 && (int) out.size() > from)
         throw std::runtime_error("arena: " + std::to_string(out.size()) + " experts out of a slot, " + std::to_string(from) + " slots to take them");
@@ -1564,6 +1571,7 @@ void Engine::ffn_half(int T, int call, CardBuf& b, const CardW& w, const LayerW&
         // FNX_PREFETCH: the next layer's router on this FFN input and its top 10 a row, beside the shared expert
         if (const int nl = (int) (&L - w.L.data()) + 1; prefetch_ && T >= prefetch_min_t_ && nl > 0 && nl < NL) {
             gemv_bf16(w.L[(size_t) nl].router, b.mixed, b.pf_logits, NEXP, N, T, b.st2);
+            expert_mask_logits(b.pf_logits, T, NEXP, b.ekeep ? b.ekeep + (size_t) nl * (NEXP / 32) : nullptr, b.st2);   // FNX_EXPERT_MASK
             probe_guess(b.pf_logits, T, b.pf_guess, b.st2);
             if (b.memo_guess && noc_mode().memo == 1) memo_merge(b.memo_guess, nl, T, b.pf_guess, b.st2);   // memo_patch.py: lookup rows from the memo
         }
@@ -1590,6 +1598,7 @@ void Engine::ffn_half(int T, int call, CardBuf& b, const CardW& w, const LayerW&
         return f;
     }();
     RouteTail rt;
+    if (b.ekeep && lyr >= 0 && lyr < NL) rt.keep = b.ekeep + (size_t) lyr * (NEXP / 32);   // FNX_EXPERT_MASK (maska_patch.py)
     if (over && dma && (fold & 1)) rt.box = p100_dma_box(b.dma), rt.dev = p100_dma_dev(b.dma), rt.gu_bytes = L.gu_e_stride, rt.dn_bytes = L.down_e_stride;
     if (over && (fold & 2)) rt.xh = b.xh16;
     prof_mark(b, PK_ROUTER);
@@ -1607,6 +1616,7 @@ void Engine::ffn_half(int T, int call, CardBuf& b, const CardW& w, const LayerW&
                             b.probe_cnt, b.st);
             if (l + 1 < NL) {
                 gemv_bf16(w.L[(size_t) l + 1].router, b.mixed, b.probe_logits, NEXP, N, T, b.st);
+                expert_mask_logits(b.probe_logits, T, NEXP, b.ekeep ? b.ekeep + (size_t) (l + 1) * (NEXP / 32) : nullptr, b.st);   // FNX_EXPERT_MASK
                 probe_guess(b.probe_logits, T, b.probe_guess + (size_t) (l + 1) * MAXT * TOPK, b.st);
             }
         }

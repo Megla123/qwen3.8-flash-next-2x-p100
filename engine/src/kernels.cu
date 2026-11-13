@@ -2218,6 +2218,18 @@ size_t gdn_prompt_work_floats(int C, int nv) { return (size_t) ((C + GCH - 1) / 
 
 namespace fnx {
 #if FNX_KPART == 8
+// FNX_EXPERT_MASK (maska_patch.py): a dropped expert's logit to -inf in rows of `stride` floats (the first NEXP the router's)
+__global__ void k_expert_mask(float* logits, int rows, int stride, const unsigned* keep) {
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= rows * NEXP) return;
+    const int e = i % NEXP;
+    if (!(keep[e >> 5] >> (e & 31) & 1u)) logits[(size_t) (i / NEXP) * stride + e] = -INFINITY;
+}
+void expert_mask_logits(float* logits, int rows, int stride, const unsigned* keep, void* st) {
+    if (!keep || rows <= 0) return;
+    k_expert_mask<<<(rows * NEXP + 255) / 256, 256, 0, (cudaStream_t) st>>>(logits, rows, stride, keep);
+    ck_launch("expert_mask_logits");
+}
 void router_route(const uint16_t* W, const float* x, float* logits, int T, int* topi, float* topw, Job* jobs_gu, Job* jobs_dn,
                   int* njobs, void* st, const ExpertCache* ec, int layer, int* list, const Q8S* sh_gu, int sh_rows, const void* sh_y,
                   float* sh_out, const RouteTail* rt) {

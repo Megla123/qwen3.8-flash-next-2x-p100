@@ -275,6 +275,11 @@ struct Model {
     // engine's arena and lent to the K/V pool coldest first as it grows (score: the profile's, per byte; higher is hotter)
     bool arena = false;
     std::vector<double> score;           // [NL * NEXP]
+    // FNX_EXPERT_MASK=file (maska_patch.py): [NL * NEXP], 1 = kept (a pruned release's experts, e.g. ISTA-DASLab's Coder: 256
+    // of 512 a layer); empty: every expert. The router never picks a dropped one, and it ranks below every kept one for VRAM
+    std::vector<char> keep;
+    bool kept(int g) const { return keep.empty() || keep[(size_t) g] != 0; }
+    void load_expert_mask();   // reads FNX_EXPERT_MASK once (unset: keep stays empty)
     explicit Model(const std::string& gguf_first_shard, Load how = Load::PLAIN, Store* store = nullptr, const std::string* image = nullptr);
     // the residency and arena settings (FNX_EXPERT_RAM_GIB, FNX_ARENA, FNX_EXPERT_PROFILE) read again
     void choose_residency();

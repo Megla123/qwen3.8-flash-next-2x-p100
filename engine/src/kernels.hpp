@@ -289,10 +289,14 @@ struct RouteTail {
     void* box = nullptr;
     void* dev = nullptr;
     size_t gu_bytes = 0, dn_bytes = 0;
+    const unsigned* keep = nullptr;   // FNX_EXPERT_MASK (maska_patch.py): the layer's kept experts, a bit each (null: every one)
 };
 void router_route(const uint16_t* W, const float* x, float* logits, int T, int* topi, float* topw, Job* jobs_gu, Job* jobs_dn,
                   int* njobs, void* st, const ExpertCache* ec = nullptr, int layer = -1, int* list = nullptr, const Q8S* sh_gu = nullptr,
                   int sh_rows = 0, const void* sh_y = nullptr, float* sh_out = nullptr, const RouteTail* rt = nullptr);
+// FNX_EXPERT_MASK (maska_patch.py): rows of `stride` floats whose first NEXP are a layer's router logits; a dropped
+// expert's (its bit in keep clear) to -inf, so no top 10 or guess ever picks it. keep null: nothing to do
+void expert_mask_logits(float* logits, int rows, int stride, const unsigned* keep, void* st);
 // gu rows of 2*ffs: [gate | up] (A: per-expert stacked rows, stride sa). sh_down (Q4_K experts only): the shared
 // expert's swiglu of sh_gu ([T][2 * sh_ffs]) and down (N rows) into sh_out (row stride N), in the same launch
 void moe_gate_up(const DW& A, size_t sa, const Job* jobs, const int* njobs, int njobs_max, const void* xq, float* gu, void* st,

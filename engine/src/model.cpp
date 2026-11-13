@@ -1585,7 +1585,42 @@ Model::Model(const std::string& path, Load how, Store* store, const std::string*
                  st.read_seconds(), disk, rate, cache, std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count());
 }
 
+// FNX_EXPERT_MASK=file (maska_patch.py): one line a layer, "layer e e ...", the experts kept (indices of the full model);
+// '#' starts a comment line. Every layer needs a line and at least TOPK experts
+void Model::load_expert_mask() {
+    const char* mf = std::getenv("FNX_EXPERT_MASK");
+    if (!mf || !*mf || !keep.empty()) return;
+    std::ifstream in(mf);
+    if (!in) throw std::runtime_error(std::string("fnx: FNX_EXPERT_MASK: cannot open ") + mf);
+    std::vector<char> k((size_t) NL * NEXP, 0);
+    std::vector<int> per(NL, 0);
+    std::vector<char> seen(NL, 0);
+    std::string line;
+    while (std::getline(in, line)) {
+        if (line.empty() || line[0] == '#') continue;
+        std::istringstream is(line);
+        int l = -1, e = -1;
+        if (!(is >> l) || l < 0 || l >= NL || seen[(size_t) l]) throw std::runtime_error("fnx: FNX_EXPERT_MASK: not a new layer's line: " + line.substr(0, 80));
+        seen[(size_t) l] = 1;
+        while (is >> e) {
+            if (e < 0 || e >= NEXP) throw std::runtime_error("fnx: FNX_EXPERT_MASK: layer " + std::to_string(l) + ": expert " + std::to_string(e) + " out of range");
+            if (!k[(size_t) l * NEXP + e]) k[(size_t) l * NEXP + e] = 1, ++per[(size_t) l];
+        }
+        if (!is.eof()) throw std::runtime_error("fnx: FNX_EXPERT_MASK: layer " + std::to_string(l) + ": not a number in its line");
+    }
+    int total = 0;
+    for (int l = 0; l < NL; ++l) {
+        if (per[(size_t) l] < TOPK)
+            throw std::runtime_error("fnx: FNX_EXPERT_MASK: layer " + std::to_string(l) + " keeps " + std::to_string(per[(size_t) l]) +
+                                     " experts, fewer than the " + std::to_string(TOPK) + " a token takes");
+        total += per[(size_t) l];
+    }
+    keep.swap(k);
+    std::fprintf(stderr, "fnx: FNX_EXPERT_MASK %s: %d of %d routed experts kept\n", mf, total, NL * NEXP);
+}
+
 void Model::choose_residency() {
+    load_expert_mask();   // FNX_EXPERT_MASK (maska_patch.py)
     resident.clear();
     score.clear();
     perm.clear();
@@ -1632,6 +1667,7 @@ void Model::choose_residency() {
             for (int e = 0; e < NEXP; ++e) {
                 const size_t i = (size_t) l * NEXP + e;
                 score[i] = (cnt[i] / std::max(1.0, td) + cnt[(size_t) NL * NEXP + i] / std::max(1.0, tp)) / bytes[(size_t) l];
+                if (!kept((int) i)) score[i] = -1.0;   // FNX_EXPERT_MASK: never picked, the first to RAM
             }
         }
         std::vector<int> order((size_t) NL * NEXP);

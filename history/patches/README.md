@@ -19,6 +19,8 @@ release. Their changes are already in `engine/`; [docs/HISTORY.md](../../docs/HI
 | `q4x_patch.py` | `FNX_SH_IN` (its `FNX_PLE_DISK` was dropped for `FNX_PLE_RAM`) | P100 kernels for UD-Q4_K_XL's expert types (Q4_K, Q5_K, Q5_1, Q8_0) |
 | `numa_patch.py` | `FNX_NUMA_EXPERTS` | experts' RAM copy on the card's CPU (no gain, off) |
 | `warm_patch.py` | `FNX_PLE_WARM` | read the lookup table once after the load (slower, off) |
+| `maska_patch.py` | `FNX_EXPERT_MASK` | build `40ef6d53`: route only to the experts ISTA-DASLab's Coder release keeps |
 
 The 64 GB mode (`FNX_PLE_RAM`, `FNX_EXPERT_DYN_GIB`, `FNX_EXPERT_DYN_MIN`) was written in this repository, not by a script: our
-Q4 build took it from here. All of the above together are the sources of build `c213636c`.
+Q4 build took it from here. All of the above but `maska_patch.py` are the sources of build `c213636c`; `maska_patch.py`
+applied to them gives the sources in `engine/` (build `40ef6d53`).

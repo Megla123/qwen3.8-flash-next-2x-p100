@@ -155,6 +155,7 @@ struct CardBuf {
     // commit waits on it before writing that copy again
     cudaEvent_t commit_ev = nullptr, rows_commit_ev = nullptr;
     unsigned* route_cnt = nullptr;   // FNX_ROUTE_COUNT, card 0: [decode | prompt][NL][NEXP] picks
+    unsigned* ekeep = nullptr;       // FNX_EXPERT_MASK (maska_patch.py): [NL][NEXP / 32] bits, set: the expert is kept
     unsigned* route_trace = nullptr;              // FNX_ROUTE_TRACE=M, card 0, mapped host memory: decode's picks in order (M million)
     unsigned long long* route_trace_len = nullptr;
     unsigned long long route_trace_cap = 0;

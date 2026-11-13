@@ -16,11 +16,17 @@ server, with this repository's benchmark (see "Our numbers"):
 > the larger quantization (72 GiB of experts against 49), so fewer of its experts fit on the cards, edits wait for
 > PCIe, and 96 GB of RAM is tight for it (see "Unsloth's UD-Q4_K_XL").
 
+**Coder** (`setup.sh DATA --coder`, either file): the router picks only from the half of the experts that ISTA-DASLab's
+Coder release keeps. On our server fresh writing and code edits ran 9-11 % faster on IQ3_S, and code edits 43 % faster
+on UD-Q4_K_XL. But it is a different, smaller model: it is worse outside code, and in our tests it ignored an
+instruction given in Slovenian (see "Coder").
+
 The engine is one executable. [Strata](https://github.com/Niko1221/Strata)'s Python server (v0.2.9) drives it and gives
 you the OpenAI-compatible API, the tokenizer and the chat template. This repository holds the engine's sources exactly
-as our production engine for UD-Q4_K_XL was built from them (with the IQ3_S profile they give our IQ3_S production
-engine's bits, see "Our numbers"), the build, run configs for both files, and the benchmark we measure with. The model
-is not included: you download it yourself (see "Prepare the model files").
+as our Coder build (`40ef6d53`) was built from them: our production engine for UD-Q4_K_XL plus the Coder switch, which
+when off gives our IQ3_S production engine's bits (see "Our numbers"). It also has the build, run configs for both
+files, and the benchmark we measure with. The model is not included: you download it yourself (see "Prepare the model
+files").
 
 - What is ours and what is Strata's: [NOTICE.md](NOTICE.md), file by file in [docs/PROVENANCE.md](docs/PROVENANCE.md),
   every change in [docs/upstream-v0.2.10.diff](docs/upstream-v0.2.10.diff).
@@ -53,7 +59,9 @@ yours).
   first-token logits in 27 of 27 requests and the same speeds (66.9, 111.0 / 116.0, 953). The 64 GB mode gave the IQ3_S
   profile's logits in 27 of 27 (for that comparison with the same YaRN setting as the 512k profile; speed does not depend
   on it). In the morning window this build with the UD-Q4_K_XL profile of then and our production engine for it
-  (`c213636c`) gave the same logits in 29 of 29 requests, the picture's included.
+  (`c213636c`) gave the same logits in 29 of 29 requests, the picture's included. This folder's sources since then
+  (`40ef6d53`, `c213636c` plus `FNX_EXPERT_MASK`) with the switch unset gave our IQ3_S production engine's logits in 27 of
+  27 requests (KL 0) and its speeds (our test chain: fresh 66.96 against 66.86, a 36k read 943.9 against 942.5).
 - **The 64 GB mode** ran in a memory cgroup of 58 GiB on our 96 GB server (see "64 GB of RAM").
 - **UD-Q4_K_XL:** 10 GiB of RAM stayed available at the lowest in both runs, and no swap was used. The 256k profile ran
   right after the 512k one, so most of the lookup table was still in the page cache: its "cold" read is warm (the 512k
@@ -167,6 +175,62 @@ block's scales apply. `setup.sh --model q4_k_xl` downloads it with ISTA-DASLab's
 - **The same bits as our production:** see "Our numbers". The kernels compute in FP16 like the IQ3_S ones, so against
   other engines the answers are close, not identical.
 
+## Coder
+
+[ISTA-DASLab/Qwen3.8-Flash-Next-GSQ-RCO-Coder-GGUF](https://huggingface.co/ISTA-DASLab/Qwen3.8-Flash-Next-GSQ-RCO-Coder-GGUF)
+(Apache-2.0) removes half of the routed experts, 256 of 512 in each layer. RCO chose them for code, agentic tool use and
+pictures, and the model card says abilities outside that set degrade. We do not use their file. Its allocation list
+names the experts it keeps by their index in the full model ("the mask can be reapplied to the original weights").
+`FNX_EXPERT_MASK` applies that list to the full IQ3_S or UD-Q4_K_XL weights: the router never picks a dropped expert,
+and the ten picks are weighted among themselves as in the pruned model. So this is the Coder's choice of experts with
+your file's weights, not ISTA-DASLab's Coder file.
+
+- **Turn it on:** `bash setup.sh /data/flash-next-coder --models /data/flash-next/models --coder` writes a Coder profile
+  into its own folder, sharing the model files. `setup.sh` keeps an existing `profile.json`, hence the new folder. By
+  hand: `fill_profile.py --coder`, or add `"FNX_EXPERT_MASK": "<this repository>/engine/data/coder_mask.txt"` to a
+  profile's `env`.
+- **The list:** `engine/data/coder_mask.txt`, one line a layer. `python3 scripts/coder_mask.py ALLOCATION.txt OUT.txt`
+  makes it from their
+  `tensor-allocation/Qwen3.8-Flash-Next-GSQ-RCO-IQ1_M-00001-of-00002.rco-allocation.txt` (revision
+  `bba88856f8c3c0c9e40e45f82d05e228b814ac43`), byte for byte.
+- **Why it is faster:** each token's ten experts come from 256 a layer instead of 512, so more of them are on the cards
+  already. The dropped experts go to RAM first, which leaves the cards' slots to the kept ones. RAM use does not change
+  (every expert is still loaded), so it needs 96 GB like the full profile. With the 64 GB mode it has not been tried.
+
+**Speed.** Our own test chain (the benchmark's fresh prompts and Markdown edit, other texts for the reads and the Python
+edit, see "Our rounds"), not `bench/bench.py`. It ran at our production's `FNX_ROUTE_PRIOR=0.15`, full and Coder in the
+same test window on 13 Nov 2026, each once on a freshly loaded engine, tok/s:
+
+| Test | IQ3_S | IQ3_S, Coder | UD-Q4_K_XL, 512k | UD-Q4_K_XL, 512k, Coder (two runs) |
+|---|---:|---:|---:|---:|
+| Fresh writing: 12 new prompts, 300 tokens each | 68.8 | **75.2** (+9 %) | 55.3 | **60.9-61.6** (+10-11 %) |
+| Edit: a 4.6 KB Python file with a variable renamed (1,388 tokens) | 116.7-118.8 | **130.2-131.2** (+11 %) | 77.5-77.6 | **110.2-112.6** (+43 %) |
+| Edit: a 5,000-character Markdown text with a word replaced (1,228 tokens) | 121.5-122.5 | 133.0-133.9, did not edit | 79.4-83.2 | 102.6-108.5, did not edit |
+| Cold read of 36,424 tokens | 943 | **979** (+4 %) | 695 | 751-886 |
+| New messages on a running conversation, 1,719 to 20,787 tokens | 665-941 | 738-980 | 459-781 | 571-906 |
+| Picture, asked in Slovenian: the answer, time to it | "Rdeča in modra", 3.4 s | "red, blue", 2.9 s | not run | "red, blue", 3.2 s |
+
+With `FNX_EXPERT_RAM_GIB=26` instead of 29 (more of the kept experts on the cards) IQ3_S Coder was not faster (fresh
+73.6). UD-Q4_K_XL's reads vary between runs because its RAM is tight (see "Unsloth's UD-Q4_K_XL").
+
+**What it does to the answers.** It is lossy by design, far more than `FNX_ROUTE_PRIOR` (see "Exact and lossy"):
+
+- **First token:** against the full IQ3_S model, both at 0.15, the first-token logits of our 29 test requests gave KL
+  2.2 on average, median 0.15, and the same first token in 23 of 29. UD-Q4_K_XL Coder against full IQ3_S: the same
+  first token in 22-23 of 27-29. For scale, in the same windows: full UD-Q4_K_XL (at 0.15) against full IQ3_S (at 0)
+  gave KL 0.041 (26 of 27), and our IQ3_S production engine against this build without the mask, both at 0.15,
+  KL 0.0034 (29 of 29; at 0 the two give KL 0).
+- **The Python edit** (rename a variable): the same text as the full model's, on both files.
+- **The Markdown edit,** asked in Slovenian to replace a word in a Markdown text: the full model replaced every
+  occurrence, and the Coder returned the text without a single replacement on both files. So its speed in that row is
+  the speed of copying the text.
+- **The picture question,** asked in Slovenian: the full model answered in Slovenian, the Coder correctly but in English.
+- **Code benchmarks:** we have not run any. ISTA-DASLab's card gives, for their own file, SWE-bench Verified 79.20
+  (82.80 at BF16) and LiveCodeBench v6 87.43 (the same as BF16). Those are not numbers for the masked IQ3_S or UD-Q4_K_XL.
+
+Use it for code. For general use, and for instructions in languages other than English, keep the full model. We have
+not checked it on English prose.
+
 ## Requirements
 
 - **Linux, x86-64.**
@@ -200,7 +264,8 @@ bash run.sh /data/flash-next           # the server on http://127.0.0.1:8080/v1,
 
 - `bash setup.sh /data/flash-next --ram 64` writes the 64 GB mode's profile; `bash setup.sh /data/flash-next-q4 --model q4_k_xl`
   downloads and sets up Unsloth's UD-Q4_K_XL instead of the IQ3_S file (112 GB). One `DATA` folder holds one profile, so
-  give each model its own folder, or `--models` the same model folder to share the downloads.
+  give each model its own folder, or `--models` the same model folder to share the downloads. `--coder` (with either
+  file) writes a Coder profile (see "Coder").
 - `bash setup.sh /data/flash-next --check` only reports what is there and what is still to do.
 - `setup.sh` skips every step whose result is already there, so after an interruption you run it again; downloads
   resume. `--models DIR` uses model files you already have (they are checked against SHA-256), `--no-pictures` leaves
@@ -343,7 +408,7 @@ python3 profile/fill_profile.py --models "$MODELS" --mtp "$PREP"/mtp-rt --tokeni
 # without --vision-exe: no pictures; --route-prior 0.15: our production setting (lossy); --gpu 2,3 if the P100 are
 # not cards 0 and 1; --exe if you built elsewhere than build/; --draft-vocab for another draft vocabulary;
 # --ram 64: the 64 GB mode; --model q4_k_xl: UD-Q4_K_XL (profile/flash-next-q4_k_xl-512k.template.json; its 256k one
-# with --template profile/flash-next-q4_k_xl-256k.template.json)
+# with --template profile/flash-next-q4_k_xl-256k.template.json); --coder: only the Coder's experts (lossy)
 ```
 
 `run.sh` then starts Strata's server with it from the v0.2.9 checkout, which by hand is:
@@ -412,6 +477,8 @@ means that: the same bits as our previous build.
   5 JSON tasks, 3 hidden-data tasks, 6 Slovenian answers) came out the same as at 0. The same prompt at temperature 0 no
   longer always gives the same text, because the routing depends on what the cache holds. At 0.3 a long Markdown edit
   made only 2 of 6 replacements, so we stopped at 0.15. The template defaults to 0.
+- **`FNX_EXPERT_MASK`** (`--coder`) makes it a different model on purpose, with half of the experts (see "Coder").
+  Unset, it changes nothing.
 - **Against other engines** the answers are close, not identical: the P100 kernels compute in FP16 where Strata's use
   other arithmetic (`FNX_PF_F16ACC`, the HFMA2 expert kernels). Against our earlier engine on the same cards (Strata
   0.2.9's layer-split engine with our P100 kernels) the first token matched in 21 of 21 requests. The YaRN setting
@@ -463,9 +530,13 @@ none of them was measured on another machine.
   they run.
 - `history/patches/` holds the last patch scripts we applied, with our build machine's paths. They are a record: their
   changes are already in `engine/`.
+- **Coder:** worse than the full model outside code, and in our tests it ignored an instruction given in Slovenian and
+  answered a Slovenian question in English (see "Coder"). It has not been run with the 64 GB mode or through
+  `bench/bench.py`.
 - This folder's `build.sh` built the engine on our server (17.5 minutes with `JOBS=12`, llama.cpp from our Strata v0.2.9
   build tree at the pinned commit), and that engine gave our production engines' bits ("Our numbers"); the profile
-  writer and the benchmark ran there as they are. `setup.sh` and `run.sh` were run against stand-ins (a fake Strata
+  writer and the benchmark ran there as they are. The Coder change came after that: its sources (`maska_patch.py`
+  applied to the ones `build.sh` built) were built in the build directory `c213636c` came from, not yet with `build.sh`. `setup.sh` and `run.sh` were run against stand-ins (a fake Strata
   checkout and tools, small model files), not yet against the real downloads.
 
 ## Credits and license
@@ -474,10 +545,11 @@ none of them was measured on another machine.
 - **sFNX** by John Fink (MIT, https://github.com/johnfink8/sfnx): the split-every-layer engine Strata ported.
 - **ggml / llama.cpp** by the ggml authors (MIT): the GPU block formats and dot products; `engine/src/iq3s_x.cuh` is made
   from its `vecdotq.cuh`.
-- **ISTA-DASLab** for the GSQ-RCO model files, **Qwen** for Qwen3.8-Flash-Next.
+- **ISTA-DASLab** for the GSQ-RCO model files and the Coder release's list of kept experts (Apache-2.0, see
+  [third_party/ista-daslab/](third_party/ista-daslab/)), **Qwen** for Qwen3.8-Flash-Next.
 - Ideas taken from others: the 16-bit `dp4a` form (`fnx_dp4a_xmad` in `p100_compat.h`) from KaneQuah/Kmic-68's llama.cpp
   fork (commit `99eb48176d`); the copy-engine thread for missing experts (`FNX_P100_DMA`) from DeepInfer; the register
   constraint in `fnx_dp4a_vmad` from Strata PR #4274; the expert pool floor from Strata 0.2.12 (commit `20885f7a`).
 
-MIT, the same license as Strata: see [LICENSE](LICENSE) and [NOTICE.md](NOTICE.md). The licenses of sFNX and ggml are in
-[third_party/](third_party/).
+MIT, the same license as Strata: see [LICENSE](LICENSE) and [NOTICE.md](NOTICE.md). The licenses of sFNX and ggml, and of
+the Coder's expert list (Apache-2.0), are in [third_party/](third_party/).
