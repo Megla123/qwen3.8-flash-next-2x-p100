@@ -63,6 +63,7 @@
   "FNX_PREFETCH_WANT": "2",
   "FNX_PREFETCH_MIN_T": "2",
   "FNX_ROUTE_PRIOR": "{{ROUTE_PRIOR}}",
+  "FNX_MTP_EXPERTS": "q4_0",
   "FNX_DMA_SPLIT": "2",
   "FNX_PF_JOBV": "7",
   "FNX_PF_CONV": "3",

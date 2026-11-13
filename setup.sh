@@ -126,6 +126,7 @@ for f in "${NEEDED[@]}"; do
   need=$((need + ${SIZE[$f]} - have))
 done
 [ -f "$PREP/mtp-rt/experts.bin" ] || need=$((need + 7 * 1024 * 1024 * 1024))
+[ -f "$PREP/mtp-rt/experts-q4_0.bin" ] || need=$((need + 2 * 1024 * 1024 * 1024))
 avail_on() { local d=$1; while [ ! -d "$d" ]; do d=$(dirname "$d"); done; df -Pk "$d" | awk 'NR == 2 {print $4 * 1024}'; }
 if [ "$need" -gt 0 ]; then
   for d in "$MODELS" "$PREP"; do
@@ -225,7 +226,23 @@ else
   rm -rf "$PREP/mtp-rt.tmp"
   run_tool tools/mtp_rt.py --gguf "$PREP/mtp-q2_0.gguf" --out "$PREP/mtp-rt.tmp"
   mv "$PREP/mtp-rt.tmp" "$PREP/mtp-rt"
-  say "the MTP draft layer is in $PREP/mtp-rt; $PREP/mtp-bf16 and $PREP/mtp-q2_0.gguf (6 GB) can be deleted"
+  say "the MTP draft layer is in $PREP/mtp-rt"
+fi
+# its experts as Q4_0 from the BF16 tensors (scripts/mtp_q4.py; the UD-Q4_K_XL profiles use them: writing +10 %, the same
+# answers): the expert tensors are fetched again if mtp-bf16 is gone
+if [ -f "$PREP/mtp-rt/experts-q4_0.bin" ]; then
+  ok "Q4_0 draft experts at $PREP/mtp-rt/experts-q4_0.bin"
+elif [ "$CHECK" = 1 ]; then
+  todo "the Q4_0 draft experts $PREP/mtp-rt/experts-q4_0.bin (5 GB from Qwen's checkpoint unless $PREP/mtp-bf16 is there)"
+else
+  say "the MTP draft layer's experts as Q4_0"
+  if [ ! -f "$PREP/mtp-bf16/tensors/mtp.layers.0.mlp.experts.down_proj.bin" ] || [ ! -f "$PREP/mtp-bf16/tensors/mtp.layers.0.mlp.experts.gate_up_proj.bin" ]; then
+    mkdir -p "$PREP/mtp-bf16"
+    run_tool tools/mtp_fetch.py inventory --out "$PREP/mtp-bf16"
+    run_tool tools/mtp_fetch.py fetch --out "$PREP/mtp-bf16" --only mlp.experts
+  fi
+  (cd "$STRATA" && .venv/bin/python "$HERE/scripts/mtp_q4.py" "$PREP/mtp-bf16" "$PREP/mtp-rt/experts-q4_0.bin")
+  say "$PREP/mtp-bf16 and $PREP/mtp-q2_0.gguf (6 GB) can be deleted now"
 fi
 
 # ------------------------------------------------------------------ the picture encoder (as ours: CUDA build, run on the CPU)

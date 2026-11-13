@@ -106,7 +106,8 @@ def main():
     need = [str(native.with_name(f)) for f in files] + [
             cfg["args"][cfg["args"].index("--draft-vocab") + 1],
             cfg["env"]["FNX_EXPERT_PROFILE"], cfg["tokenizer"] + "/vocab.json", cfg["tokenizer"] + "/chat_template.jinja",
-            cfg["args"][cfg["args"].index("--mtp") + 1] + "/dense.bin", cfg["args"][cfg["args"].index("--mtp") + 1] + "/experts.bin",
+            cfg["args"][cfg["args"].index("--mtp") + 1] + "/dense.bin",
+            cfg["args"][cfg["args"].index("--mtp") + 1] + ("/experts-q4_0.bin" if cfg["env"].get("FNX_MTP_EXPERTS") == "q4_0" else "/experts.bin"),
             cfg["exe"]]
     if "vision" in cfg:
         need += [cfg["vision"]["exe"], cfg["vision"]["mmproj"]]

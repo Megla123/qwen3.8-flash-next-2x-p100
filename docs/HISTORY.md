@@ -30,6 +30,7 @@ digits of each binary's SHA-256.
 | 13 Nov | **`c213636c`** | P100 kernels for UD-Q4_K_XL's expert types (Q4_K, Q5_K, Q5_1, Q8_0) and `FNX_SH_IN`; the 64 GB mode (`FNX_PLE_RAM`, `FNX_EXPERT_DYN_GIB`, written in this repository); two RAM placement ideas that gave nothing (`FNX_NUMA_EXPERTS`, `FNX_PLE_WARM`, off) | UD-Q4_K_XL: a 36k read 146 → 722-905 tok/s, fresh writing 52.6; IQ3_S unchanged; the first UD-Q4_K_XL release |
 | 13 Nov | `c213636c` | UD-Q4_K_XL settings only: a 512k profile (`FNX_EXPERT_DYN_GIB=18`: the K/V pool borrows up to 7.6 GiB of expert slots a card), the 256k one with the same 18, and 2 guessed experts a row in the next-layer copies (`FNX_PREFETCH_WANT=2`, was 6) | UD-Q4_K_XL in the benchmark: fresh 41.4 → 50.3, edits 45.3 / 43.9 → 62.6 / 63.5, long read 726 → 765, the picture's first answer 48.4 → 4.2 s (512k); reads to 501k tokens at 737 tok/s |
 | 13 Nov | **`40ef6d53`** | `FNX_EXPERT_MASK`: the router picks only from the experts ISTA-DASLab's Coder release keeps (256 of 512 a layer), on either file's own weights; unset, the same bits as `bf9c7f1f` (KL 0, 27 of 27) | lossy by design. IQ3_S at λ 0.15: fresh 68.8 → 75.2, edit py 117-119 → 130-131, long read 943 → 979; UD-Q4_K_XL at λ 0.15: fresh 55.3 → 60.9, edit py 77.5 → 111; **this release** (README, "Coder") |
+| 13 Nov | `c213636c` | UD-Q4_K_XL settings only: the MTP draft layer's experts as Q4_0 from the BF16 tensors (`FNX_MTP_EXPERTS=q4_0`, `scripts/mtp_q4.py`) instead of Strata's 2-bit file, the same VRAM; the same answers token for token | fresh writing 46.99 -> 51.84 (+10.3 %) at `FNX_ROUTE_PRIOR=0`, edits equal; IQ3_S +1 % (kept on 2-bit) |
 
 ## Tried and dropped
 
@@ -70,6 +71,7 @@ Ours were made on 21 Oct 2026 with an older Strata.
 | `mtp-rt/dense.bin` | `c724dc0b0822ada5d2977bf5bde821605feabaa64ea2e0045b67ca656329070a` |
 | `mtp-rt/dense.txt` | `991456cf4eb266eb8a888c349e548d11bc640f5dbd9149439aa9786af0f732fd` |
 | `mtp-rt/experts.bin` | `09398406be61f1f54c93861f449e48b8df0bfccbc9ec9b2b7636775a6ea9244f` |
+| `mtp-rt/experts-q4_0.bin` (13 Nov, `scripts/mtp_q4.py`) | `2775490f13a29eb36868b96b727d4b3c901e7de7d75e0952477d87851a7a2829` |
 | `tokenizer/chat_template.jinja` | `12827f24b742ea4e80cdc12dbcf9622227056b9f797252a3149263d4f9aaadce` |
 | `tokenizer/merges.txt` | `4ba698529766c7a2f5052083ea10cdf2485577f5237a332ee291054eb11e3332` |
 | `tokenizer/tokenizer.json` | `c0bd435efbc6c3b28964b47999afe16c4ad268c7c7c4e8cb3af410796a6f30bf` |

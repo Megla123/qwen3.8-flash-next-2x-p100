@@ -156,6 +156,12 @@ block's scales apply. `setup.sh --model q4_k_xl` downloads it with ISTA-DASLab's
   through the page cache and only the experts the cards may give up kept in RAM (`FNX_EXPERT_DYN_GIB=18`), RAM holds
   70.5 GiB of experts and 10 GiB stayed available at the lowest in the benchmark runs. The first long read after a load
   waits for the disk (765 tok/s at 38,862 tokens); later ones find more of the table in the page cache (about 900).
+- **Q4_0 draft experts** (`FNX_MTP_EXPERTS=q4_0`, since 13 Nov 2026): the MTP draft layer's experts made from Qwen's BF16
+  tensors with `scripts/mtp_q4.py` instead of Strata's 2-bit ones, in the same VRAM. The model checks every drafted token,
+  so the answers stay the same token for token; more drafts are accepted, and fresh writing ran 10 % faster (our round
+  `mtp3` at `FNX_ROUTE_PRIOR=0`: 46.99 -> 51.84 tok/s; edits, drafted mostly by prompt lookup, equal). With IQ3_S, whose
+  distribution sits further from the BF16 model the draft now follows, the gain was about 1 %, so its profile keeps the
+  2-bit file. `setup.sh` makes the file; the benchmark numbers above are from before it.
 - **What the RAM copies are for.** Of the 72.5 GiB of experts 52.5 GiB live only in RAM; the cards hold the rest. Those
   keep a RAM copy when the prompt path (its staging buffers) or the K/V pool (at 524,288, up to 7.6 GiB a card) may
   borrow their slots, and when they are dynamic: the cards' expert cache then follows the work. With 5.2 GiB fixed on the
@@ -373,7 +379,10 @@ runtime files:
 .venv/bin/python tools/mtp_fetch.py verify --out "$PREP"/mtp-bf16
 .venv/bin/python tools/mtp_pack.py --src "$PREP"/mtp-bf16 --experts q2_0 --out "$PREP"/mtp-q2_0.gguf
 .venv/bin/python tools/mtp_rt.py --gguf "$PREP"/mtp-q2_0.gguf --out "$PREP"/mtp-rt
-# $PREP/mtp-rt holds dense.bin, dense.txt and experts.bin; $PREP/mtp-bf16 and mtp-q2_0.gguf can go afterwards
+# $PREP/mtp-rt holds dense.bin, dense.txt and experts.bin (Strata's 2-bit draft experts)
+.venv/bin/python ../scripts/mtp_q4.py "$PREP"/mtp-bf16 "$PREP"/mtp-rt/experts-q4_0.bin
+# the draft experts as Q4_0 from the BF16 tensors (1.4 GB), for FNX_MTP_EXPERTS=q4_0 (the UD-Q4_K_XL profiles);
+# $PREP/mtp-bf16 and mtp-q2_0.gguf can go afterwards
 ```
 
 The SHA-256 of our MTP and tokenizer files are in [docs/HISTORY.md](docs/HISTORY.md#our-prepared-files), to compare.
@@ -438,7 +447,7 @@ after about 5 minutes; then the API is at `http://127.0.0.1:8080/v1`.
 The `env` block holds 38 `FNX_*` switches. The ones that matter most for speed: `FNX_EXPERT_RAM_GIB=29.0` (how much of
 the experts stays in RAM only), `FNX_P100_DMA=1` with `FNX_DMA_SPLIT=2` and `FNX_PREFETCH=1` (copying missing experts),
 `FNX_PF_JOBV=7`, `FNX_PF_STAGE_ALL=1`, `FNX_PF_SP=1` and `FNX_PF_F16ACC=1` (reading), `FNX_P100_ATTN_DEC=1` (attention
-while writing). The UD-Q4_K_XL profiles differ in seven of them ([docs/SWITCHES.md](docs/SWITCHES.md#the-ud-q4_k_xl-profiles)).
+while writing). The UD-Q4_K_XL profiles differ in eight of them ([docs/SWITCHES.md](docs/SWITCHES.md#the-ud-q4_k_xl-profiles)).
 To stay within the trained 262,144 positions, edit the written JSON: `--max-context 262144`, and remove `FNX_ROPE_SCALE`
 and `FNX_YARN_ORIG_CTX`.
 
